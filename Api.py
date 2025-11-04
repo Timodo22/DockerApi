@@ -1,345 +1,256 @@
-from fastapi import FastAPI, HTTPException, Request
+# Api.py — Microsoft Entra Verified ID (OpenID4VP) Verifier API
+#
+# Endpoints:
+#   GET  /                               -> health/info
+#   POST /presentation/request           -> maak QR/presentation request (geeft openid_url terug)
+#   POST /presentation/callback          -> ontvangt direct_post met vp_token na scannen
+#   GET  /presentation/{request_id}/status -> frontend kan status poll'en
+#
+# Vereist: fastapi, uvicorn, python-jose (optioneel voor claims lezen)
+#   pip install fastapi uvicorn python-multipart python-jose
+#
+# Start lokaal:
+#   uvicorn Api:app --host 0.0.0.0 --port 8000
+#
+# Deploy: je hebt 'm al draaien op Render (https://dockerapi-aika.onrender.com)
+
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import jwt
+from typing import Dict, Optional
+import uuid
 import json
 import base64
-from typing import Dict, Any, Optional, List
-from datetime import datetime
-import uuid
-import secrets
-from urllib.parse import urlencode
+from datetime import datetime, timezone
 
-app = FastAPI(title="VP Token Verifier API")
+try:
+    # Alleen gebruikt om claims on-verified te lezen (geen netwerk nodig)
+    from jose import jwt
+    JOSE_AVAILABLE = True
+except Exception:
+    JOSE_AVAILABLE = False
 
-# CORS configuratie voor frontend
+app = FastAPI(title="Verified ID Verifier API")
+
+# -----------------------------
+# CORS: jouw frontend + API
+# -----------------------------
+ALLOWED_ORIGINS = [
+    "https://datastor.pages.dev",             # jouw frontend
+    "https://dockerapi-aika.onrender.com",    # je API zelf (optioneel)
+    "http://localhost:5173",                  # lokaal testen (optioneel)
+    "http://localhost:3000",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# In-memory storage voor presentation requests
-presentation_sessions = {}
+# -----------------------------
+# Entra Verified ID configuratie
+# Vul deze 2 in vanuit je app-registratie
+# -----------------------------
+AZURE_CLIENT_ID = "780eaf2e-e0a9-421f-8ec3-006c13b504d0"
+AZURE_TENANT_ID = "39d28fd2-8cad-4518-b104-f0d193a7d451"
+AZURE_REDIRECT_URI = "https://dockerapi-aika.onrender.com/presentation/callback"
 
-class PresentationRequest(BaseModel):
-    requested_credentials: Optional[List[str]] = ["VerifiableId"]
-    purpose: Optional[str] = "Verification"
 
-class VPTokenRequest(BaseModel):
-    token: str
-    verify_signature: bool = False
-
-class VPTokenResponse(BaseModel):
-    success: bool
-    decoded_token: Optional[Dict[str, Any]] = None
-    header: Optional[Dict[str, Any]] = None
-    payload: Optional[Dict[str, Any]] = None
-    credentials: Optional[list] = None
-    holder: Optional[str] = None
+# -----------------------------
+# In-memory sessie opslag
+# In productie -> redis/db
+# -----------------------------
+class Session(BaseModel):
+    request_id: str
+    state_b64: str
+    nonce: str
+    created_at: str
+    status: str = "waiting"         # waiting | verified | error
+    vp_token: Optional[str] = None
+    subject: Optional[str] = None   # extracted sub / did (indien beschikbaar)
+    raw_callback: Optional[dict] = None
     error: Optional[str] = None
 
-def decode_base64url(data: str) -> bytes:
-    """Decode base64url encoded data"""
-    data = data.replace('-', '+').replace('_', '/')
-    padding = 4 - len(data) % 4
-    if padding != 4:
-        data += '=' * padding
-    return base64.b64decode(data)
+SESSIONS: Dict[str, Session] = {}
 
-def parse_jwt_without_verification(token: str) -> Dict[str, Any]:
-    """Parse JWT zonder signature verificatie"""
+# -----------------------------
+# Helpers
+# -----------------------------
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+def b64url_json(data: dict) -> str:
+    return base64.urlsafe_b64encode(json.dumps(data).encode()).decode().rstrip("=")
+
+def read_jwt_unverified(token: str) -> dict:
+    """
+    Alleen om claims te tonen in status (NIET als security check).
+    Voor echte validatie moet je de vp_token cryptografisch verifiëren
+    t.o.v. de juiste issuer/wallet keys.
+    """
+    if not JOSE_AVAILABLE:
+        # fallback: brute split zonder verificatie (alleen payload)
+        try:
+            parts = token.split(".")
+            if len(parts) < 2:
+                return {}
+            payload_b64 = parts[1] + "==="
+            payload_bytes = base64.urlsafe_b64decode(payload_b64.encode())
+            return json.loads(payload_bytes.decode())
+        except Exception:
+            return {}
     try:
-        parts = token.split('.')
-        if len(parts) != 3:
-            raise ValueError("Invalid JWT format")
-        
-        header = json.loads(decode_base64url(parts[0]))
-        payload = json.loads(decode_base64url(parts[1]))
-        
-        return {
-            'header': header,
-            'payload': payload,
-            'signature': parts[2]
-        }
-    except Exception as e:
-        raise ValueError(f"Failed to parse JWT: {str(e)}")
+        return jwt.get_unverified_claims(token)
+    except Exception:
+        return {}
 
-def extract_credentials_from_vp(payload: Dict[str, Any]) -> list:
-    """Extract credentials van VP token"""
-    credentials = []
-    
-    if 'vp' in payload:
-        vp = payload['vp']
-        if 'verifiableCredential' in vp:
-            vcs = vp['verifiableCredential']
-            if isinstance(vcs, list):
-                for vc in vcs:
-                    if isinstance(vc, str):
-                        try:
-                            decoded_vc = parse_jwt_without_verification(vc)
-                            credentials.append({
-                                'type': 'jwt',
-                                'header': decoded_vc['header'],
-                                'payload': decoded_vc['payload']
-                            })
-                        except:
-                            credentials.append({
-                                'type': 'string',
-                                'value': vc
-                            })
-                    else:
-                        credentials.append({
-                            'type': 'object',
-                            'data': vc
-                        })
-    
-    return credentials
-
+# -----------------------------
+# Routes
+# -----------------------------
 @app.get("/")
-async def root():
+def root():
     return {
-        "message": "VP Token Verifier API - OpenID4VP Compatible",
-        "version": "2.0.0",
-        "endpoints": {
-            "/request/create": "POST - Creëer een presentation request",
-            "/request/{request_id}": "GET - Haal presentation request op",
-            "/presentation/{request_id}": "POST - Ontvang VP token",
-            "/presentation/{request_id}/status": "GET - Check presentation status",
-            "/decode": "POST - Decode VP token",
-            "/health": "GET - Health check"
-        }
+        "ok": True,
+        "service": "Verified ID Verifier API",
+        "redirect_uri": AZURE_REDIRECT_URI,
+        "cors_origins": ALLOWED_ORIGINS,
+        "time": now_iso(),
+        "mode": "OpenID4VP (vp_token via direct_post)"
     }
 
-@app.get("/health")
-async def health():
-    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
-
-@app.post("/request/create")
-async def create_presentation_request(request: PresentationRequest):
+@app.post("/presentation/request")
+async def create_presentation_request(request: Request):
     """
-    Creëer een nieuwe presentation request en genereer OpenID4VP URL
+    Maakt een OpenID4VP authorize URL (voor QR) met response_mode=direct_post.
+    Je frontend toont deze URL als QR-code; Microsoft Authenticator kan 'm scannen.
     """
-    request_id = str(uuid.uuid4())
-    state = secrets.token_urlsafe(32)
-    nonce = secrets.token_urlsafe(32)
-    
-    # Sla de sessie op
-    presentation_sessions[request_id] = {
-        'state': state,
-        'nonce': nonce,
-        'requested_credentials': request.requested_credentials,
-        'purpose': request.purpose,
-        'created_at': datetime.utcnow().isoformat(),
-        'status': 'pending',
-        'vp_token': None
-    }
-    
-    # Basis URL van de verifier (pas aan voor productie)
-    base_url = "http://localhost:8000"
-    
-    # OpenID4VP authorization request parameters
-    params = {
-        'response_type': 'vp_token',
-        'client_id': f'{base_url}/client',
-        'redirect_uri': f'{base_url}/presentation/{request_id}',
-        'response_mode': 'direct_post',
-        'state': state,
-        'nonce': nonce,
-        'presentation_definition': json.dumps({
-            'id': request_id,
-            'input_descriptors': [
-                {
-                    'id': 'credential_input',
-                    'name': request.purpose,
-                    'purpose': request.purpose,
-                    'constraints': {
-                        'fields': [
-                            {
-                                'path': ['$.type'],
-                                'filter': {
-                                    'type': 'array',
-                                    'contains': {
-                                        'type': 'string',
-                                        'pattern': '|'.join(request.requested_credentials)
-                                    }
-                                }
-                            }
-                        ]
-                    }
-                }
-            ]
-        })
-    }
-    
-    # Genereer de OpenID4VP URL
-    openid_url = f"openid4vp://?{urlencode(params)}"
-    
-    return {
-        'request_id': request_id,
-        'openid_url': openid_url,
-        'state': state,
-        'status': 'pending',
-        'message': 'Scan de QR code met je wallet om credentials te delen'
-    }
-
-@app.get("/request/{request_id}")
-async def get_presentation_request(request_id: str):
-    """
-    Haal een presentation request op (gebruikt door wallet)
-    """
-    if request_id not in presentation_sessions:
-        raise HTTPException(status_code=404, detail="Request not found")
-    
-    session = presentation_sessions[request_id]
-    
-    return {
-        'presentation_definition': {
-            'id': request_id,
-            'input_descriptors': [
-                {
-                    'id': 'credential_input',
-                    'name': session['purpose'],
-                    'purpose': session['purpose'],
-                    'constraints': {
-                        'fields': [
-                            {
-                                'path': ['$.type'],
-                                'filter': {
-                                    'type': 'array',
-                                    'contains': {
-                                        'type': 'string',
-                                        'pattern': '|'.join(session['requested_credentials'])
-                                    }
-                                }
-                            }
-                        ]
-                    }
-                }
-            ]
-        },
-        'nonce': session['nonce'],
-        'state': session['state']
-    }
-
-@app.post("/presentation/{request_id}")
-async def receive_presentation(request_id: str, request: Request):
-    """
-    Ontvang VP token van de wallet (direct_post endpoint)
-    """
-    if request_id not in presentation_sessions:
-        raise HTTPException(status_code=404, detail="Request not found")
-    
-    # Parse form data of JSON
-    content_type = request.headers.get('content-type', '')
-    
-    if 'application/x-www-form-urlencoded' in content_type:
-        form_data = await request.form()
-        vp_token = form_data.get('vp_token')
-        state = form_data.get('state')
-    else:
-        json_data = await request.json()
-        vp_token = json_data.get('vp_token')
-        state = json_data.get('state')
-    
-    session = presentation_sessions[request_id]
-    
-    # Verificeer state
-    if state != session['state']:
-        raise HTTPException(status_code=400, detail="Invalid state")
-    
-    # Decode VP token
     try:
-        parsed = parse_jwt_without_verification(vp_token)
-        credentials = extract_credentials_from_vp(parsed['payload'])
-        holder = parsed['payload'].get('iss') or parsed['payload'].get('sub')
-        
-        # Update sessie
-        session['status'] = 'completed'
-        session['vp_token'] = vp_token
-        session['decoded'] = {
-            'header': parsed['header'],
-            'payload': parsed['payload'],
-            'credentials': credentials,
-            'holder': holder
-        }
-        session['completed_at'] = datetime.utcnow().isoformat()
-        
-        return {
-            'status': 'success',
-            'message': 'Presentation received and verified'
-        }
-        
-    except Exception as e:
-        session['status'] = 'failed'
-        session['error'] = str(e)
-        raise HTTPException(status_code=400, detail=f"Invalid VP token: {str(e)}")
+        _ = await request.body()  # niet gebruikt, maar laten staan voor uitbreidingen
+    except Exception:
+        pass
+
+    request_id = str(uuid.uuid4())
+    nonce = str(uuid.uuid4())
+
+    # Stop request_id + timestamp in state zodat we in callback weten welke sessie dit is.
+    state_payload = {"rid": request_id, "ts": now_iso()}
+    state_b64 = b64url_json(state_payload)
+
+    # OpenID4VP authorize URL richting Microsoft (tenant-specifiek)
+    openid_url = (
+        f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/oauth2/v2.0/authorize?"
+        f"client_id={AZURE_CLIENT_ID}"
+        f"&response_type=vp_token"
+        f"&redirect_uri={AZURE_REDIRECT_URI}"
+        f"&response_mode=direct_post"
+        f"&scope=openid"
+        f"&state={state_b64}"
+        f"&nonce={nonce}"
+    )
+
+    session = Session(
+        request_id=request_id,
+        state_b64=state_b64,
+        nonce=nonce,
+        created_at=now_iso(),
+        status="waiting"
+    )
+    SESSIONS[request_id] = session
+
+    # Frontend kan 'openid_url' omzetten naar QR
+    return {
+        "request_id": request_id,
+        "openid_url": openid_url,
+        "state": state_b64,
+        "nonce": nonce,
+        "created_at": session.created_at,
+    }
+
+@app.post("/presentation/callback")
+async def presentation_callback(request: Request):
+    """
+    Microsoft (of de wallet) POST deze callback met response_mode=direct_post.
+    Verwacht onder meer:
+      - vp_token (JWT met de verifiable presentation)
+      - state   (onze base64-encoded JSON met rid)
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON in callback")
+
+    state_b64 = data.get("state")
+    vp_token = data.get("vp_token")
+    error = data.get("error")
+
+    # Vind de sessie terug via state.rid
+    rid = None
+    try:
+        # correct padding toevoegen
+        pad = "=" * ((4 - len(state_b64) % 4) % 4)
+        decoded = json.loads(base64.urlsafe_b64decode((state_b64 + pad).encode()).decode())
+        rid = decoded.get("rid")
+    except Exception:
+        pass
+
+    if not rid or rid not in SESSIONS:
+        # fallback: probeer op request_id die mogelijk meegestuurd is
+        rid = data.get("request_id")
+        if not rid or rid not in SESSIONS:
+            raise HTTPException(status_code=400, detail="Unknown or expired state/request")
+
+    session = SESSIONS[rid]
+    session.raw_callback = data
+
+    if error:
+        session.status = "error"
+        session.error = str(error)
+        return {"ok": False, "request_id": rid, "status": "error"}
+
+    if not vp_token:
+        session.status = "error"
+        session.error = "Missing vp_token"
+        return {"ok": False, "request_id": rid, "status": "error"}
+
+    # (Optioneel) lees on-verified claims voor debugging/UX
+    claims = read_jwt_unverified(vp_token)
+    subject = claims.get("sub") or claims.get("subject") or claims.get("cnf", {}).get("kid")
+
+    session.vp_token = vp_token
+    session.subject = subject
+    session.status = "verified"
+
+    return {"ok": True, "request_id": rid, "status": "verified"}
 
 @app.get("/presentation/{request_id}/status")
-async def get_presentation_status(request_id: str):
+def presentation_status(request_id: str):
     """
-    Check de status van een presentation request
+    Frontend pollt dit endpoint om te weten of de presentatie is afgerond.
     """
-    if request_id not in presentation_sessions:
-        raise HTTPException(status_code=404, detail="Request not found")
-    
-    session = presentation_sessions[request_id]
-    
+    session = SESSIONS.get(request_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Request not found or expired")
+
     response = {
-        'request_id': request_id,
-        'status': session['status'],
-        'created_at': session['created_at']
+        "request_id": session.request_id,
+        "status": session.status,
+        "created_at": session.created_at,
     }
-    
-    if session['status'] == 'completed':
-        response['completed_at'] = session.get('completed_at')
-        response['decoded'] = session.get('decoded')
-    elif session['status'] == 'failed':
-        response['error'] = session.get('error')
-    
+
+    if session.status == "verified":
+        # Let op: dit zijn on-verified claims (alleen ter illustratie/UX)
+        response.update({
+            "subject": session.subject,
+            "has_vp_token": bool(session.vp_token),
+        })
+    if session.status == "error":
+        response["error"] = session.error
+
     return response
 
-@app.post("/decode", response_model=VPTokenResponse)
-async def decode_vp_token(request: VPTokenRequest):
-    """
-    Decode een VP token rechtstreeks (voor handmatige verificatie)
-    """
-    try:
-        token = request.token.strip()
-        
-        if "vp_token=" in token:
-            token = token.split("vp_token=")[1].split("&")[0]
-        
-        from urllib.parse import unquote
-        token = unquote(token)
-        
-        parsed = parse_jwt_without_verification(token)
-        credentials = extract_credentials_from_vp(parsed['payload'])
-        holder = parsed['payload'].get('iss') or parsed['payload'].get('sub')
-        
-        return VPTokenResponse(
-            success=True,
-            decoded_token=parsed,
-            header=parsed['header'],
-            payload=parsed['payload'],
-            credentials=credentials,
-            holder=holder
-        )
-        
-    except Exception as e:
-        return VPTokenResponse(
-            success=False,
-            error=str(e)
-        )
-
-@app.get("/")
-async def serve_frontend():
-    return FileResponse(frontend_path)
-
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+@app.get("/health")
+def health():
+    return {"ok": True, "time": now_iso()}

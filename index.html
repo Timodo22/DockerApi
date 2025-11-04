@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VP Token Verifier - OpenID4VP</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 30px;
+        }
+        
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+        
+        .header p {
+            opacity: 0.9;
+        }
+        
+        .card {
+            background: white;
+            border-radius: 15px;
+            padding: 30px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            margin-bottom: 20px;
+        }
+        
+        .qr-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+        }
+        
+        #qrcode {
+            margin: 20px 0;
+            padding: 20px;
+            background: white;
+            border-radius: 10px;
+            border: 2px solid #667eea;
+        }
+        
+        .openid-url {
+            width: 100%;
+            padding: 12px;
+            margin: 15px 0;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-family: monospace;
+            font-size: 12px;
+            word-break: break-all;
+            background: #f8f9fa;
+        }
+        
+        .form-group {
+            margin-bottom: 20px;
+        }
+        
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #333;
+        }
+        
+        .form-group input,
+        .form-group select {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+        }
+        
+        .form-group input:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        
+        .btn {
+            padding: 12px 30px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s;
+            display: inline-block;
+        }
+        
+        .btn:hover {
+            transform: translateY(-2px);
+        }
+        
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+        
+        .btn-secondary {
+            background: #6c757d;
+        }
+        
+        .btn-success {
+            background: #28a745;
+        }
+        
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        
+        .status-pending {
+            background: #ffc107;
+            animation: pulse 2s infinite;
+        }
+        
+        .status-completed {
+            background: #28a745;
+        }
+        
+        .status-failed {
+            background: #dc3545;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        .results {
+            margin-top: 30px;
+        }
+        
+        .result-section {
+            margin-bottom: 20px;
+        }
+        
+        .result-section h3 {
+            color: #667eea;
+            margin-bottom: 10px;
+            font-size: 1.2em;
+        }
+        
+        .json-display {
+            background: #f8f9fa;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 15px;
+            overflow-x: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        
+        .credential-card {
+            background: #f8f9fa;
+            border-left: 4px solid #667eea;
+            padding: 15px;
+            margin-bottom: 15px;
+            border-radius: 5px;
+        }
+        
+        .credential-card h4 {
+            color: #333;
+            margin-bottom: 10px;
+        }
+        
+        .alert {
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        
+        .alert-success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        
+        .alert-info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+        
+        .alert-error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        
+        .button-group {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+            flex-wrap: wrap;
+        }
+        
+        .copy-btn {
+            padding: 6px 12px;
+            background: #6c757d;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+        
+        .copy-btn:hover {
+            background: #5a6268;
+        }
+        
+        .info-box {
+            background: #e7f3ff;
+            border-left: 4px solid #2196F3;
+            padding: 15px;
+            margin-bottom: 20px;
+            border-radius: 5px;
+        }
+        
+        .info-box h4 {
+            color: #1976D2;
+            margin-bottom: 10px;
+        }
+        
+        .info-box ul {
+            margin-left: 20px;
+            color: #555;
+        }
+        
+        .info-box ul li {
+            margin: 5px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔐 VP Token Verifier</h1>
+            <p>OpenID4VP Compatible Verifier - Maak een verificatie request</p>
+        </div>
+        
+        <div class="card">
+            <h2>📝 Verificatie Request Aanmaken</h2>
+            
+            <div class="info-box">
+                <h4>ℹ️ Hoe werkt het?</h4>
+                <ul>
+                    <li>Vul de gevraagde credentials in</li>
+                    <li>Klik op "Genereer QR Code"</li>
+                    <li>Scan de QR code met je Walt.id wallet</li>
+                    <li>Deel je credentials via de wallet</li>
+                    <li>Zie de resultaten hieronder verschijnen</li>
+                </ul>
+            </div>
+            
+            <form id="request-form" onsubmit="createRequest(event)">
+                <div class="form-group">
+                    <label>Gevraagde Credential Types:</label>
+                    <select id="credential-type" multiple size="5">
+                        <option value="VerifiableId" selected>VerifiableId</option>
+                        <option value="VerifiableDiploma">VerifiableDiploma</option>
+                        <option value="VerifiableAttestation">VerifiableAttestation</option>
+                        <option value="UniversityDegree">UniversityDegree</option>
+                        <option value="OpenBadgeCredential">OpenBadgeCredential</option>
+                    </select>
+                    <small style="color: #666;">Houd Ctrl/Cmd ingedrukt om meerdere te selecteren</small>
+                </div>
+                
+                <div class="form-group">
+                    <label>Verificatie Doel:</label>
+                    <input type="text" id="purpose" value="Identity Verification" placeholder="Bijv: Identity Verification">
+                </div>
+                
+                <button type="submit" class="btn">🎯 Genereer QR Code</button>
+            </form>
+        </div>
+        
+        <div id="qr-section" class="card" style="display: none;">
+            <h2>📱 Scan met je Wallet</h2>
+            
+            <div id="status-display" class="alert alert-info">
+                <span class="status-indicator status-pending"></span>
+                <span id="status-text">Wachten op wallet scan...</span>
+            </div>
+            
+            <div class="qr-container">
+                <div id="qrcode"></div>
+                
+                <div style="width: 100%;">
+                    <label style="font-weight: 600; margin-bottom: 5px; display: block;">OpenID4VP URL:</label>
+                    <div class="openid-url" id="openid-url"></div>
+                    <button class="copy-btn" onclick="copyUrl()">📋 Kopieer URL</button>
+                </div>
+            </div>
+            
+            <div class="button-group">
+                <button class="btn btn-secondary" onclick="resetRequest()">🔄 Nieuwe Request</button>
+            </div>
+        </div>
+        
+        <div id="results" style="display: none;">
+            <div class="card">
+                <h2>✅ Verificatie Succesvol!</h2>
+                
+                <div class="result-section">
+                    <h3>Holder Informatie</h3>
+                    <div id="holder-result" class="json-display"></div>
+                </div>
+                
+                <div class="result-section">
+                    <h3>Verifiable Credentials</h3>
+                    <div id="credentials-result"></div>
+                </div>
+                
+                <div class="result-section">
+                    <h3>Token Header</h3>
+                    <div id="header-result" class="json-display"></div>
+                </div>
+                
+                <div class="result-section">
+                    <h3>Token Payload</h3>
+                    <div id="payload-result" class="json-display"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = 'http://localhost:8000';
+        let currentRequestId = null;
+        let pollInterval = null;
+        
+        async function createRequest(event) {
+            event.preventDefault();
+            
+            const selectedCredentials = Array.from(document.getElementById('credential-type').selectedOptions)
+                .map(opt => opt.value);
+            
+            const purpose = document.getElementById('purpose').value.trim();
+            
+            if (selectedCredentials.length === 0) {
+                alert('Selecteer minimaal één credential type');
+                return;
+            }
+            
+            try {
+                const response = await fetch(`${API_URL}/request/create`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        requested_credentials: selectedCredentials,
+                        purpose: purpose || 'Verification'
+                    })
+                });
+                
+                const result = await response.json();
+                
+                if (result.request_id) {
+                    currentRequestId = result.request_id;
+                    displayQRCode(result.openid_url);
+                    startPolling();
+                } else {
+                    alert('Fout bij aanmaken request: ' + JSON.stringify(result));
+                }
+            } catch (error) {
+                alert('Fout bij verbinden met API: ' + error.message);
+            }
+        }
+        
+        function displayQRCode(url) {
+            // Toon QR sectie
+            document.getElementById('qr-section').style.display = 'block';
+            document.getElementById('results').style.display = 'none';
+            
+            // Clear oude QR code
+            const qrcodeDiv = document.getElementById('qrcode');
+            qrcodeDiv.innerHTML = '';
+            
+            // Genereer nieuwe QR code
+            new QRCode(qrcodeDiv, {
+                text: url,
+                width: 300,
+                height: 300,
+                colorDark: "#667eea",
+                colorLight: "#ffffff",
+                correctLevel: QRCode.CorrectLevel.M
+            });
+            
+            // Toon URL
+            document.getElementById('openid-url').textContent = url;
+            
+            // Scroll naar QR code
+            document.getElementById('qr-section').scrollIntoView({ behavior: 'smooth' });
+        }
+        
+        function startPolling() {
+            // Poll elke 2 seconden
+            pollInterval = setInterval(checkStatus, 2000);
+        }
+        
+        function stopPolling() {
+            if (pollInterval) {
+                clearInterval(pollInterval);
+                pollInterval = null;
+            }
+        }
+        
+        async function checkStatus() {
+            if (!currentRequestId) return;
+            
+            try {
+                const response = await fetch(`${API_URL}/presentation/${currentRequestId}/status`);
+                const result = await response.json();
+                
+                if (result.status === 'completed') {
+                    stopPolling();
+                    updateStatus('Verificatie succesvol! ✅', 'completed');
+                    displayResults(result.decoded);
+                } else if (result.status === 'failed') {
+                    stopPolling();
+                    updateStatus('Verificatie mislukt ❌: ' + result.error, 'failed');
+                } else {
+                    updateStatus('Wachten op wallet scan...', 'pending');
+                }
+            } catch (error) {
+                console.error('Status check error:', error);
+            }
+        }
+        
+        function updateStatus(text, status) {
+            const statusDisplay = document.getElementById('status-display');
+            const statusText = document.getElementById('status-text');
+            const indicator = statusDisplay.querySelector('.status-indicator');
+            
+            statusText.textContent = text;
+            indicator.className = `status-indicator status-${status}`;
+            
+            if (status === 'completed') {
+                statusDisplay.className = 'alert alert-success';
+            } else if (status === 'failed') {
+                statusDisplay.className = 'alert alert-error';
+            } else {
+                statusDisplay.className = 'alert alert-info';
+            }
+        }
+        
+        function displayResults(decoded) {
+            document.getElementById('results').style.display = 'block';
+            
+            // Holder
+            document.getElementById('holder-result').textContent = 
+                decoded.holder || 'Geen holder informatie gevonden';
+            
+            // Credentials
+            const credentialsDiv = document.getElementById('credentials-result');
+            if (decoded.credentials && decoded.credentials.length > 0) {
+                credentialsDiv.innerHTML = decoded.credentials.map((cred, index) => `
+                    <div class="credential-card">
+                        <h4>Credential ${index + 1} (${cred.type})</h4>
+                        <div class="json-display">${JSON.stringify(cred, null, 2)}</div>
+                    </div>
+                `).join('');
+            } else {
+                credentialsDiv.innerHTML = '<p>Geen credentials gevonden</p>';
+            }
+            
+            // Header
+            document.getElementById('header-result').textContent = 
+                JSON.stringify(decoded.header, null, 2);
+            
+            // Payload
+            document.getElementById('payload-result').textContent = 
+                JSON.stringify(decoded.payload, null, 2);
+            
+            // Scroll naar resultaten
+            document.getElementById('results').scrollIntoView({ behavior: 'smooth' });
+        }
+        
+        function copyUrl() {
+            const url = document.getElementById('openid-url').textContent;
+            navigator.clipboard.writeText(url).then(() => {
+                alert('URL gekopieerd naar klembord!');
+            });
+        }
+        
+        function resetRequest() {
+            stopPolling();
+            currentRequestId = null;
+            document.getElementById('qr-section').style.display = 'none';
+            document.getElementById('results').style.display = 'none';
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+        }
+        
+        // Cleanup bij page unload
+        window.addEventListener('beforeunload', () => {
+            stopPolling();
+        });
+    </script>
+</body>
+</html>

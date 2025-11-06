@@ -27,15 +27,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ✅ Fix: maak map aan als die niet bestaat
-import os
-os.makedirs("definitions", exist_ok=True)
+# -----------------------------------------------------
+# STATIC FILES SETUP
+# -----------------------------------------------------
+base_dir = os.path.dirname(os.path.abspath(__file__))
+definitions_dir = os.path.join(base_dir, "definitions")
+os.makedirs(definitions_dir, exist_ok=True)
 
-# ✅ Mount de map zodat Paradym de JSON's kan ophalen
-app.mount("/definitions", StaticFiles(directory="definitions"), name="definitions")
-
-# ✅ Serve static definition JSON files for Paradym Wallet
-app.mount("/definitions", StaticFiles(directory="definitions"), name="definitions")
+# ✅ serve definition JSONs publicly
+app.mount("/definitions", StaticFiles(directory=definitions_dir), name="definitions")
 
 # -----------------------------------------------------
 # DATA STORE
@@ -84,9 +84,14 @@ async def create_request(req: PresentationRequest):
     state = secrets.token_urlsafe(32)
     nonce = secrets.token_urlsafe(32)
 
-    # Presentation Definition (required by Paradym)
+    # ✅ Presentation Definition (Paradym expects "format" to be defined)
     definition = {
         "id": request_id,
+        "format": {
+            "jwt_vp": {
+                "alg": ["ES256", "EdDSA"]
+            }
+        },
         "input_descriptors": [{
             "id": "login_credential",
             "name": req.purpose,
@@ -106,9 +111,8 @@ async def create_request(req: PresentationRequest):
         }]
     }
 
-    # Save definition so Paradym can fetch it
-    os.makedirs("definitions", exist_ok=True)
-    definition_path = f"definitions/{request_id}.json"
+    # ✅ Save definition so Paradym can fetch it
+    definition_path = os.path.join(definitions_dir, f"{request_id}.json")
     with open(definition_path, "w") as f:
         json.dump(definition, f)
 
@@ -120,7 +124,8 @@ async def create_request(req: PresentationRequest):
     }
 
     presentation_definition_uri = f"{BASE_URL}/definitions/{request_id}.json"
-    print(f"[DEBUG] Presentation definition URL: {presentation_definition_uri}")
+    print(f"[DEBUG] ✅ New request created: {request_id}")
+    print(f"[DEBUG] Definition URL: {presentation_definition_uri}")
 
     params = {
         "response_type": "vp_token",
@@ -132,9 +137,8 @@ async def create_request(req: PresentationRequest):
         "presentation_definition_uri": presentation_definition_uri
     }
 
-    # ✅ Use deep link so wallet opens directly
+    # ✅ Use OpenID4VP deep link (opens Paradym app)
     openid_url = f"openid4vp://?{urlencode(params)}"
-
     print(f"[DEBUG] OpenID4VP link: {openid_url}")
 
     return {"request_id": request_id, "openid_url": openid_url}
@@ -184,7 +188,7 @@ async def status(request_id: str):
 # -----------------------------------------------------
 @app.get("/frontend")
 async def serve_frontend():
-    path = os.path.join(os.path.dirname(__file__), "index.html")
+    path = os.path.join(base_dir, "index.html")
     return FileResponse(path)
 
 # -----------------------------------------------------
@@ -193,4 +197,3 @@ async def serve_frontend():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-

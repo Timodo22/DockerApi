@@ -9,10 +9,11 @@ import httpx, os, uuid, secrets, json
 # -----------------------------------------------------
 # INIT
 # -----------------------------------------------------
-app = FastAPI(title="Paradym Login Verifier API (via official API)")
+app = FastAPI(title="Paradym Login Verifier API (official Paradym API)")
 
+# ⚙️ Base URLs
 BASE_URL = os.getenv("BASE_URL", "https://dockerapi-aika.onrender.com")
-PARADYM_BASE = "https://paradym.id"
+PARADYM_BASE = "https://api.paradym.id"   # ✅ juiste endpoint
 PARADYM_API_KEY = "paradym_e230f2ddfe60f9f3b74137e538354863015a678e98336a04a099a22215cea79c"
 
 if not PARADYM_API_KEY:
@@ -47,25 +48,20 @@ class PresentationRequest(BaseModel):
 # -----------------------------------------------------
 @app.get("/")
 async def root():
-    return {
-        "status": "running",
-        "service": "Paradym Login Verifier (via official API)"
-    }
+    return {"status": "running", "service": "Paradym Login Verifier (official API)"}
 
 # -----------------------------------------------------
-# 1️⃣ Create verification request (via Paradym API)
+# 1️⃣ Create verification request via Paradym API
 # -----------------------------------------------------
 @app.post("/request/create")
 async def create_request(req: PresentationRequest):
     request_id = str(uuid.uuid4())
     state = secrets.token_urlsafe(32)
 
-    # Construct presentation definition (same format as docs)
+    # Presentation definition structure (required by Paradym)
     presentation_definition = {
         "id": request_id,
-        "format": {
-            "jwt_vp": {"alg": ["ES256", "EdDSA"]}
-        },
+        "format": {"jwt_vp": {"alg": ["ES256", "EdDSA"]}},
         "input_descriptors": [{
             "id": "login_credential",
             "name": req.purpose,
@@ -96,22 +92,29 @@ async def create_request(req: PresentationRequest):
         "Content-Type": "application/json"
     }
 
-    print("[DEBUG] Creating verification request via Paradym API...")
-    print(f"[DEBUG] Payload: {json.dumps(payload, indent=2)}")
+    print(f"[DEBUG] Creating verification request via Paradym API at {PARADYM_BASE}/api/verify ...")
+    print(f"[DEBUG] Payload:\n{json.dumps(payload, indent=2)}")
 
-    async with httpx.AsyncClient(timeout=20.0) as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(f"{PARADYM_BASE}/api/verify", headers=headers, json=payload)
 
-    if resp.status_code != 200:
-        print(f"[ERROR] Paradym API response: {resp.text}")
+    print(f"[DEBUG] Paradym raw response status: {resp.status_code}")
+    print(f"[DEBUG] Paradym raw text: {resp.text}")
+
+    if resp.status_code not in (200, 201):
         raise HTTPException(status_code=resp.status_code, detail=resp.text)
 
-    data = resp.json()
-    verify_url = data.get("verify_url")
+    try:
+        data = resp.json()
+    except Exception:
+        raise HTTPException(status_code=500, detail="Invalid JSON from Paradym API")
+
+    verify_url = data.get("verify_url") or data.get("url") or data.get("deeplink")
 
     if not verify_url:
-        raise HTTPException(status_code=500, detail="Missing verify_url from Paradym response")
+        raise HTTPException(status_code=500, detail=f"Paradym API did not return verify_url. Response: {data}")
 
+    # Store session
     sessions[request_id] = {
         "status": "pending",
         "state": state,
@@ -121,12 +124,12 @@ async def create_request(req: PresentationRequest):
     }
 
     print(f"[DEBUG] ✅ Paradym verify link created for {request_id}")
-    print(f"[DEBUG] Open link (or QR): {verify_url}")
+    print(f"[DEBUG] Open link (QR): {verify_url}")
 
     return {"request_id": request_id, "openid_url": verify_url}
 
 # -----------------------------------------------------
-# 2️⃣ Receive presentation result (Paradym callback)
+# 2️⃣ Receive presentation result (callback from Paradym)
 # -----------------------------------------------------
 @app.post("/presentation/{request_id}")
 async def receive_presentation(request_id: str, request: Request):
@@ -159,7 +162,7 @@ async def get_status(request_id: str):
     return sessions[request_id]
 
 # -----------------------------------------------------
-# 4️⃣ Serve simple frontend (optional)
+# 4️⃣ Serve frontend (optional)
 # -----------------------------------------------------
 @app.get("/frontend")
 async def serve_frontend():
@@ -172,4 +175,3 @@ async def serve_frontend():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-

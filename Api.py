@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 from datetime import datetime
 import httpx, os, uuid, secrets, json
 
@@ -11,7 +11,6 @@ import httpx, os, uuid, secrets, json
 # -----------------------------------------------------
 app = FastAPI(title="Paradym Login Verifier API (Official Paradym API)")
 
-# ⚙️ Configuration
 BASE_URL = os.getenv("BASE_URL", "https://dockerapi-aika.onrender.com")
 PARADYM_BASE = "https://api.paradym.id"
 PARADYM_API_KEY = os.getenv(
@@ -19,12 +18,10 @@ PARADYM_API_KEY = os.getenv(
     "paradym_e230f2ddfe60f9f3b74137e538354863015a678e98336a04a099a22215cea79c"
 )
 PROJECT_ID = os.getenv("PARADYM_PROJECT_ID", "cmhnkcs29000601s6dimvb8hh")
-
-# ⚠️ Vul je eigen Paradym Template ID in
 PRESENTATION_TEMPLATE_ID = os.getenv("PARADYM_TEMPLATE_ID", "cmho2guje00dds601ym08hk7f")
 
 if not PARADYM_API_KEY or not PROJECT_ID or not PRESENTATION_TEMPLATE_ID:
-    print("⚠️  Let op: PARADYM_API_KEY, PROJECT_ID of PRESENTATION_TEMPLATE_ID ontbreekt of is niet geldig.")
+    print("⚠️ Let op: PARADYM_API_KEY, PROJECT_ID of PRESENTATION_TEMPLATE_ID ontbreekt of is niet geldig.")
 
 # -----------------------------------------------------
 # MIDDLEWARE
@@ -43,7 +40,7 @@ app.add_middleware(
 sessions: Dict[str, Any] = {}
 
 # -----------------------------------------------------
-# MODELLEN
+# MODEL
 # -----------------------------------------------------
 class PresentationRequest(BaseModel):
     issuer: str = "local"
@@ -64,7 +61,6 @@ async def create_request(req: PresentationRequest):
     request_id = str(uuid.uuid4())
     state = secrets.token_urlsafe(32)
 
-    # ✅ Nieuwe payload volgens officiële Paradym API
     payload = {
         "presentationTemplateId": PRESENTATION_TEMPLATE_ID,
         "redirect_uri": f"{BASE_URL}/presentation/{request_id}",
@@ -95,13 +91,13 @@ async def create_request(req: PresentationRequest):
     except Exception:
         raise HTTPException(status_code=500, detail="Invalid JSON from Paradym API")
 
-verify_url = (
-    data.get("authorizationRequestUri")
-    or data.get("authorizationRequestQrUri")
-    or data.get("verify_url")
-    or data.get("url")
-)
-
+    # ✅ Correcte extractie van de link
+    verify_url = (
+        data.get("authorizationRequestQrUri")
+        or data.get("authorizationRequestUri")
+        or data.get("verify_url")
+        or data.get("url")
+    )
 
     if not verify_url:
         raise HTTPException(status_code=500, detail=f"Paradym API did not return a verify URL: {data}")
@@ -118,10 +114,9 @@ verify_url = (
     print(f"[DEBUG] 🔗 Verify URL (QR Link): {verify_url}")
 
     return {
-  "request_id": request_id,
-  "openid_url": verify_url  # dit is de Paradym link
-}
-
+        "request_id": request_id,
+        "openid_url": verify_url
+    }
 
 # -----------------------------------------------------
 # 2️⃣ Receive presentation result (callback from Paradym)
@@ -157,7 +152,7 @@ async def get_status(request_id: str):
     return sessions[request_id]
 
 # -----------------------------------------------------
-# 4️⃣ Serve frontend (optional)
+# 4️⃣ Serve frontend
 # -----------------------------------------------------
 @app.get("/frontend")
 async def serve_frontend():
@@ -170,5 +165,3 @@ async def serve_frontend():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
-

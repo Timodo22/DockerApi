@@ -28,7 +28,7 @@ app.add_middleware(
 presentation_sessions = {}
 
 # Config
-BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
+BASE_URL = "https://dockerapi-aika.onrender.com"
 PARADYM_BASE = "https://paradym.id"
 
 # === Models ===
@@ -303,3 +303,4 @@ async def serve_frontend():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+

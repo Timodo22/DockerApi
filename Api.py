@@ -9,15 +9,16 @@ import httpx, os, uuid, secrets, json
 # -----------------------------------------------------
 # INIT
 # -----------------------------------------------------
-app = FastAPI(title="Paradym Login Verifier API (official Paradym API)")
+app = FastAPI(title="Paradym Login Verifier API (Official Paradym API)")
 
-# ⚙️ Base URLs
+# ⚙️ Base configuration
 BASE_URL = os.getenv("BASE_URL", "https://dockerapi-aika.onrender.com")
-PARADYM_BASE = "https://api.paradym.id"   # ✅ juiste endpoint
+PARADYM_BASE = "https://api.paradym.id"
 PARADYM_API_KEY = "paradym_e230f2ddfe60f9f3b74137e538354863015a678e98336a04a099a22215cea79c"
+PROJECT_ID = os.getenv("PARADYM_PROJECT_ID", "cmhnkcs29000601s6dimvb8hh")  # ⚠️ Zet hier je echte projectId
 
-if not PARADYM_API_KEY:
-    print("⚠️  Warning: PARADYM_API_KEY is not set. Add it to your environment variables.")
+if not PARADYM_API_KEY or PROJECT_ID == "your_project_id_here":
+    print("⚠️  Let op: je hebt nog geen geldige PARADYM_API_KEY of PROJECT_ID ingesteld!")
 
 # -----------------------------------------------------
 # MIDDLEWARE
@@ -58,7 +59,7 @@ async def create_request(req: PresentationRequest):
     request_id = str(uuid.uuid4())
     state = secrets.token_urlsafe(32)
 
-    # Presentation definition structure (required by Paradym)
+    # Presentation Definition (Paradym-format)
     presentation_definition = {
         "id": request_id,
         "format": {"jwt_vp": {"alg": ["ES256", "EdDSA"]}},
@@ -81,6 +82,7 @@ async def create_request(req: PresentationRequest):
         }]
     }
 
+    # Paradym expects this payload
     payload = {
         "presentation_definition": presentation_definition,
         "redirect_uri": f"{BASE_URL}/presentation/{request_id}",
@@ -92,11 +94,12 @@ async def create_request(req: PresentationRequest):
         "Content-Type": "application/json"
     }
 
-    print(f"[DEBUG] Creating verification request via Paradym API at {PARADYM_BASE}/api/verify ...")
+    api_url = f"{PARADYM_BASE}/v1/projects/{PROJECT_ID}/openid4vc/verification/request"
+    print(f"[DEBUG] Creating verification request via Paradym API: {api_url}")
     print(f"[DEBUG] Payload:\n{json.dumps(payload, indent=2)}")
 
     async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(f"{PARADYM_BASE}/api/verify", headers=headers, json=payload)
+        resp = await client.post(api_url, headers=headers, json=payload)
 
     print(f"[DEBUG] Paradym raw response status: {resp.status_code}")
     print(f"[DEBUG] Paradym raw text: {resp.text}")
@@ -109,12 +112,16 @@ async def create_request(req: PresentationRequest):
     except Exception:
         raise HTTPException(status_code=500, detail="Invalid JSON from Paradym API")
 
-    verify_url = data.get("verify_url") or data.get("url") or data.get("deeplink")
+    verify_url = (
+        data.get("verify_url")
+        or data.get("url")
+        or data.get("deeplink")
+        or data.get("verification_url")
+    )
 
     if not verify_url:
-        raise HTTPException(status_code=500, detail=f"Paradym API did not return verify_url. Response: {data}")
+        raise HTTPException(status_code=500, detail=f"Paradym API did not return a verify URL: {data}")
 
-    # Store session
     sessions[request_id] = {
         "status": "pending",
         "state": state,

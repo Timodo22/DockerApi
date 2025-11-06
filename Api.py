@@ -21,7 +21,7 @@ PARADYM_API_KEY = os.getenv(
 PROJECT_ID = os.getenv("PARADYM_PROJECT_ID", "cmhnkcs29000601s6dimvb8hh")
 
 # ⚠️ Vul je eigen Paradym Template ID in
-PRESENTATION_TEMPLATE_ID = os.getenv("PARADYM_TEMPLATE_ID", "cmhnktbbt009us601isdwyfnm")
+PRESENTATION_TEMPLATE_ID = os.getenv("PARADYM_TEMPLATE_ID", "cmho2guje00dds601ym08hk7f")
 
 if not PARADYM_API_KEY or not PROJECT_ID or not PRESENTATION_TEMPLATE_ID:
     print("⚠️  Let op: PARADYM_API_KEY, PROJECT_ID of PRESENTATION_TEMPLATE_ID ontbreekt of is niet geldig.")
@@ -165,3 +165,4 @@ async def serve_frontend():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+

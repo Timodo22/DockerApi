@@ -1,21 +1,19 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import jwt
-import json
-import base64
+from fastapi.responses import FileResponse
 from typing import Dict, Any, Optional, List
 from datetime import datetime
-import uuid
-import secrets
 from urllib.parse import urlencode, unquote
-from fastapi.responses import FileResponse
-import os
-import requests
+import uuid, secrets, json, os, base64, requests
 
 app = FastAPI(title="VP Token Verifier API (Paradym Enhanced)")
 
-# CORS configuratie
+# === Config ===
+BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
+PARADYM_BASE = "https://paradym.id"
+
+# === CORS ===
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -24,18 +22,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Storage in geheugen
-presentation_sessions = {}
-
-# Config
-BASE_URL = "https://dockerapi-aika.onrender.com"
-PARADYM_BASE = "https://paradym.id"
+# === Storage in geheugen ===
+presentation_sessions: Dict[str, Any] = {}
 
 # === Models ===
 class PresentationRequest(BaseModel):
     requested_credentials: Optional[List[str]] = ["VerifiableId"]
     purpose: Optional[str] = "Verification"
-    issuer: Optional[str] = "local"  # nieuw veld: local | paradym
+    issuer: Optional[str] = "local"  # 'local' | 'paradym'
 
 class VPTokenRequest(BaseModel):
     token: str
@@ -59,7 +53,6 @@ def decode_base64url(data: str) -> bytes:
         data += '=' * padding
     return base64.b64decode(data)
 
-
 def parse_jwt_without_verification(token: str) -> Dict[str, Any]:
     parts = token.split('.')
     if len(parts) != 3:
@@ -67,7 +60,6 @@ def parse_jwt_without_verification(token: str) -> Dict[str, Any]:
     header = json.loads(decode_base64url(parts[0]))
     payload = json.loads(decode_base64url(parts[1]))
     return {'header': header, 'payload': payload, 'signature': parts[2]}
-
 
 def extract_credentials_from_vp(payload: Dict[str, Any]) -> list:
     credentials = []
@@ -92,72 +84,64 @@ def extract_credentials_from_vp(payload: Dict[str, Any]) -> list:
     return credentials
 
 
-# === API Endpoints ===
+# === Routes ===
+
 @app.get("/")
 async def root():
-    return {
-        "message": "VP Token Verifier API - Paradym Enhanced",
-        "version": "3.0.0",
-        "features": [
-            "Paradym integration",
-            "Local OpenID4VP verifier",
-            "Dynamic issuer switching",
-            "JWT decoding without verification"
-        ]
-    }
-
-
-@app.get("/health")
-async def health():
-    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
+    return {"message": "Paradym VP Token Verifier API", "status": "running", "base_url": BASE_URL}
 
 
 @app.post("/request/create")
 async def create_presentation_request(request: PresentationRequest):
-    """
-    Creëer een nieuwe presentation request (Paradym of lokaal)
-    """
+    """Creëer een nieuwe presentation request (Paradym of lokaal)"""
     request_id = str(uuid.uuid4())
     state = secrets.token_urlsafe(32)
     nonce = secrets.token_urlsafe(32)
 
+    # Presentation Definition
+    definition = {
+        "id": request_id,
+        "input_descriptors": [{
+            "id": "credential_input",
+            "name": request.purpose,
+            "purpose": request.purpose,
+            "constraints": {
+                "fields": [{
+                    "path": ["$.type"],
+                    "filter": {
+                        "type": "array",
+                        "contains": {
+                            "type": "string",
+                            "pattern": "|".join(request.requested_credentials)
+                        }
+                    }
+                }]
+            }
+        }]
+    }
+
+    # Sla op als JSON-bestand zodat wallets presentation_definition_uri kunnen gebruiken
+    os.makedirs("definitions", exist_ok=True)
+    definition_path = f"definitions/{request_id}.json"
+    with open(definition_path, "w") as f:
+        json.dump(definition, f)
+
     presentation_sessions[request_id] = {
-        'state': state,
-        'nonce': nonce,
-        'requested_credentials': request.requested_credentials,
-        'purpose': request.purpose,
-        'issuer': request.issuer,
-        'created_at': datetime.utcnow().isoformat(),
-        'status': 'pending'
+        "state": state,
+        "nonce": nonce,
+        "issuer": request.issuer,
+        "status": "pending",
+        "created_at": datetime.utcnow().isoformat(),
     }
 
     params = {
-        'response_type': 'vp_token',
-        'client_id': f'{BASE_URL}/client',
-        'redirect_uri': f'{BASE_URL}/presentation/{request_id}',
-        'response_mode': 'direct_post',
-        'state': state,
-        'nonce': nonce,
-        'presentation_definition': json.dumps({
-            'id': request_id,
-            'input_descriptors': [{
-                'id': 'credential_input',
-                'name': request.purpose,
-                'purpose': request.purpose,
-                'constraints': {
-                    'fields': [{
-                        'path': ['$.type'],
-                        'filter': {
-                            'type': 'array',
-                            'contains': {
-                                'type': 'string',
-                                'pattern': '|'.join(request.requested_credentials)
-                            }
-                        }
-                    }]
-                }
-            }]
-        })
+        "response_type": "vp_token",
+        "client_id": f"{BASE_URL}/client",
+        "redirect_uri": f"{BASE_URL}/presentation/{request_id}",
+        "response_mode": "direct_post",
+        "state": state,
+        "nonce": nonce,
+        "presentation_definition_uri": f"{BASE_URL}/{definition_path}"
     }
 
     if request.issuer == "paradym":
@@ -166,141 +150,80 @@ async def create_presentation_request(request: PresentationRequest):
         openid_url = f"openid4vp://?{urlencode(params)}"
 
     return {
-        'request_id': request_id,
-        'openid_url': openid_url,
-        'issuer': request.issuer,
-        'state': state,
-        'status': 'pending',
-        'message': 'Scan de QR code met je wallet om credentials te delen'
+        "request_id": request_id,
+        "openid_url": openid_url,
+        "issuer": request.issuer,
+        "state": state,
+        "message": "Scan de QR code met je wallet om credentials te delen"
     }
 
 
 @app.post("/presentation/{request_id}")
 async def receive_presentation(request_id: str, request: Request):
-    """
-    Ontvang VP token (direct_post)
-    """
+    """Ontvang VP token (direct_post)"""
     if request_id not in presentation_sessions:
         raise HTTPException(status_code=404, detail="Request not found")
 
-    content_type = request.headers.get('content-type', '')
-    if 'application/x-www-form-urlencoded' in content_type:
-        form_data = await request.form()
-        vp_token = form_data.get('vp_token')
-        state = form_data.get('state')
-    else:
-        json_data = await request.json()
-        vp_token = json_data.get('vp_token')
-        state = json_data.get('state')
-
+    data = await request.json()
+    vp_token = data.get("vp_token")
+    state = data.get("state")
     session = presentation_sessions[request_id]
-    if state != session['state']:
+
+    if state != session["state"]:
         raise HTTPException(status_code=400, detail="Invalid state")
 
     try:
         parsed = parse_jwt_without_verification(vp_token)
-        credentials = extract_credentials_from_vp(parsed['payload'])
-        holder = parsed['payload'].get('iss') or parsed['payload'].get('sub')
+        credentials = extract_credentials_from_vp(parsed["payload"])
+        holder = parsed["payload"].get("iss") or parsed["payload"].get("sub")
 
-        session['status'] = 'completed'
-        session['vp_token'] = vp_token
-        session['decoded'] = {
-            'header': parsed['header'],
-            'payload': parsed['payload'],
-            'credentials': credentials,
-            'holder': holder,
-            'source': session['issuer']
-        }
-        session['completed_at'] = datetime.utcnow().isoformat()
-
-        return {'status': 'success', 'message': 'Presentation received and verified'}
+        session.update({
+            "status": "completed",
+            "vp_token": vp_token,
+            "decoded": {
+                "header": parsed["header"],
+                "payload": parsed["payload"],
+                "credentials": credentials,
+                "holder": holder
+            },
+            "completed_at": datetime.utcnow().isoformat()
+        })
+        return {"status": "success", "message": "Presentation received"}
     except Exception as e:
-        session['status'] = 'failed'
-        session['error'] = str(e)
-        raise HTTPException(status_code=400, detail=f"Invalid VP token: {str(e)}")
+        session["status"] = "failed"
+        session["error"] = str(e)
+        raise HTTPException(status_code=400, detail=f"Invalid VP token: {e}")
+
+
+@app.post("/paradym/callback")
+async def paradym_callback(data: Dict[str, Any]):
+    """Callback vanuit Paradym verifier flow"""
+    request_id = data.get("presentation_id") or data.get("id")
+    if not request_id:
+        raise HTTPException(status_code=400, detail="Missing presentation_id")
+    presentation_sessions[request_id] = {
+        "status": "completed",
+        "decoded": data,
+        "issuer": "paradym",
+        "completed_at": datetime.utcnow().isoformat(),
+    }
+    return {"success": True}
 
 
 @app.get("/presentation/{request_id}/status")
 async def get_presentation_status(request_id: str):
     if request_id not in presentation_sessions:
         raise HTTPException(status_code=404, detail="Request not found")
+    return presentation_sessions[request_id]
 
-    session = presentation_sessions[request_id]
-    response = {
-        'request_id': request_id,
-        'status': session['status'],
-        'issuer': session.get('issuer'),
-        'created_at': session['created_at']
-    }
-
-    if session['status'] == 'completed':
-        response['completed_at'] = session.get('completed_at')
-        response['decoded'] = session.get('decoded')
-    elif session['status'] == 'failed':
-        response['error'] = session.get('error')
-
-    return response
-
-
-@app.post("/decode", response_model=VPTokenResponse)
-async def decode_vp_token(request: VPTokenRequest):
-    try:
-        token = request.token.strip()
-        if "vp_token=" in token:
-            token = token.split("vp_token=")[1].split("&")[0]
-        token = unquote(token)
-
-        parsed = parse_jwt_without_verification(token)
-        credentials = extract_credentials_from_vp(parsed['payload'])
-        holder = parsed['payload'].get('iss') or parsed['payload'].get('sub')
-
-        return VPTokenResponse(
-            success=True,
-            decoded_token=parsed,
-            header=parsed['header'],
-            payload=parsed['payload'],
-            credentials=credentials,
-            holder=holder
-        )
-    except Exception as e:
-        return VPTokenResponse(success=False, error=str(e))
-
-
-@app.post("/paradym/callback")
-async def paradym_callback(data: Dict[str, Any]):
-    """
-    Callback vanuit Paradym verifier flow
-    """
-    request_id = data.get("presentation_id") or data.get("id")
-    if not request_id:
-        raise HTTPException(status_code=400, detail="Missing presentation_id")
-
-    presentation_sessions[request_id] = {
-        "status": "completed",
-        "decoded": data,
-        "completed_at": datetime.utcnow().isoformat(),
-        "issuer": "paradym"
-    }
-    return {"success": True}
-
-
-@app.get("/paradym/vc/{vc_id}")
-async def get_vc_info(vc_id: str):
-    try:
-        response = requests.get(f"{PARADYM_BASE}/api/vc/{vc_id}")
-        return response.json()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-frontend_path = os.path.join(os.path.dirname(__file__), "index.html")
 
 @app.get("/frontend")
 async def serve_frontend():
+    """Serve the demo HTML UI"""
+    frontend_path = os.path.join(os.path.dirname(__file__), "index.html")
     return FileResponse(frontend_path)
 
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-

@@ -20,8 +20,11 @@ PARADYM_API_KEY = os.getenv(
 )
 PROJECT_ID = os.getenv("PARADYM_PROJECT_ID", "cmhnkcs29000601s6dimvb8hh")
 
-if not PARADYM_API_KEY or PROJECT_ID == "your_project_id_here":
-    print("⚠️ Let op: PARADYM_API_KEY of PROJECT_ID ontbreekt of is niet geldig.")
+# ⚠️ Vul je eigen Paradym Template ID in
+PRESENTATION_TEMPLATE_ID = os.getenv("PARADYM_TEMPLATE_ID", "cmhnktbbt009us601isdwyfnm")
+
+if not PARADYM_API_KEY or not PROJECT_ID or not PRESENTATION_TEMPLATE_ID:
+    print("⚠️  Let op: PARADYM_API_KEY, PROJECT_ID of PRESENTATION_TEMPLATE_ID ontbreekt of is niet geldig.")
 
 # -----------------------------------------------------
 # MIDDLEWARE
@@ -45,7 +48,6 @@ sessions: Dict[str, Any] = {}
 class PresentationRequest(BaseModel):
     issuer: str = "local"
     purpose: str = "Login"
-    requested_credentials: Optional[List[str]] = ["VerifiableId"]
 
 # -----------------------------------------------------
 # ROUTES
@@ -62,37 +64,13 @@ async def create_request(req: PresentationRequest):
     request_id = str(uuid.uuid4())
     state = secrets.token_urlsafe(32)
 
-    # Presentation Definition per Paradym docs
-    presentation_definition = {
-        "id": request_id,
-        "format": {"jwt_vp": {"alg": ["ES256", "EdDSA"]}},
-        "input_descriptors": [{
-            "id": "login_credential",
-            "name": req.purpose,
-            "purpose": req.purpose,
-            "constraints": {
-                "fields": [{
-                    "path": ["$.type"],
-                    "filter": {
-                        "type": "array",
-                        "contains": {
-                            "type": "string",
-                            "pattern": "|".join(req.requested_credentials)
-                        }
-                    }
-                }]
-            }
-        }]
-    }
-
-    # ✅ Payload conform Paradym v1 API
+    # ✅ Nieuwe payload volgens officiële Paradym API
     payload = {
-        "presentation_definition": presentation_definition,
+        "presentationTemplateId": PRESENTATION_TEMPLATE_ID,
         "redirect_uri": f"{BASE_URL}/presentation/{request_id}",
         "state": state
     }
 
-    # ✅ Correcte authenticatie-header
     headers = {
         "x-access-token": PARADYM_API_KEY,
         "Content-Type": "application/json"
@@ -100,7 +78,7 @@ async def create_request(req: PresentationRequest):
 
     api_url = f"{PARADYM_BASE}/v1/projects/{PROJECT_ID}/openid4vc/verification/request"
 
-    print(f"[DEBUG] Sending POST request to: {api_url}")
+    print(f"[DEBUG] Creating verification request via Paradym API: {api_url}")
     print(f"[DEBUG] Payload:\n{json.dumps(payload, indent=2)}")
 
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -109,19 +87,14 @@ async def create_request(req: PresentationRequest):
     print(f"[DEBUG] Paradym API response status: {resp.status_code}")
     print(f"[DEBUG] Paradym API raw text: {resp.text}")
 
-    # Error handling
     if resp.status_code not in (200, 201):
-        raise HTTPException(
-            status_code=resp.status_code,
-            detail=f"Paradym API Error: {resp.text}"
-        )
+        raise HTTPException(status_code=resp.status_code, detail=resp.text)
 
     try:
         data = resp.json()
     except Exception:
         raise HTTPException(status_code=500, detail="Invalid JSON from Paradym API")
 
-    # ✅ Extract verify/deeplink URL
     verify_url = (
         data.get("verify_url")
         or data.get("url")
@@ -130,7 +103,7 @@ async def create_request(req: PresentationRequest):
     )
 
     if not verify_url:
-        raise HTTPException(status_code=500, detail=f"Missing verify_url in Paradym response: {data}")
+        raise HTTPException(status_code=500, detail=f"Paradym API did not return a verify URL: {data}")
 
     sessions[request_id] = {
         "status": "pending",
@@ -140,7 +113,7 @@ async def create_request(req: PresentationRequest):
         "verify_url": verify_url
     }
 
-    print(f"[DEBUG] ✅ Verification request created: {request_id}")
+    print(f"[DEBUG] ✅ Paradym verify link created for {request_id}")
     print(f"[DEBUG] 🔗 Verify URL (QR Link): {verify_url}")
 
     return {"request_id": request_id, "openid_url": verify_url}

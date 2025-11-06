@@ -13,7 +13,7 @@ app = FastAPI(title="Paradym Login Verifier API (via official API)")
 
 BASE_URL = os.getenv("BASE_URL", "https://dockerapi-aika.onrender.com")
 PARADYM_BASE = "https://paradym.id"
-PARADYM_API_KEY = os.getenv("PARADYM_API_KEY")
+PARADYM_API_KEY = "paradym_e230f2ddfe60f9f3b74137e538354863015a678e98336a04a099a22215cea79c"
 
 if not PARADYM_API_KEY:
     print("⚠️  Warning: PARADYM_API_KEY is not set. Add it to your environment variables.")
@@ -172,3 +172,4 @@ async def serve_frontend():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+

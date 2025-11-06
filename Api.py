@@ -27,6 +27,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ✅ Fix: maak map aan als die niet bestaat
+import os
+os.makedirs("definitions", exist_ok=True)
+
+# ✅ Mount de map zodat Paradym de JSON's kan ophalen
+app.mount("/definitions", StaticFiles(directory="definitions"), name="definitions")
+
 # ✅ Serve static definition JSON files for Paradym Wallet
 app.mount("/definitions", StaticFiles(directory="definitions"), name="definitions")
 
@@ -186,3 +193,4 @@ async def serve_frontend():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+

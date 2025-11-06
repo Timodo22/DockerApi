@@ -24,7 +24,7 @@ sessions: Dict[str, Any] = {}
 
 # -------------------- MODELLEN --------------------
 class PresentationRequest(BaseModel):
-    issuer: str = "paradym"
+    issuer: str = "local"
     purpose: str = "Login"
     requested_credentials: Optional[List[str]] = ["VerifiableId"]
 
@@ -97,7 +97,7 @@ async def create_request(req: PresentationRequest):
         "presentation_definition_uri": f"{BASE_URL}/definitions/{request_id}.json"
     }
 
-    openid_url = f"{PARADYM_BASE}/api/vc/authorize?{urlencode(params)}"
+    openid_url = f"openid4vp://?{urlencode(params)}"
     return {"request_id": request_id, "openid_url": openid_url}
 
 @app.post("/presentation/{request_id}")
@@ -139,3 +139,4 @@ async def serve_frontend():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+

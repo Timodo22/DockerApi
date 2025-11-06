@@ -95,12 +95,13 @@ async def create_request(req: PresentationRequest):
     except Exception:
         raise HTTPException(status_code=500, detail="Invalid JSON from Paradym API")
 
-    verify_url = (
-        data.get("verify_url")
-        or data.get("url")
-        or data.get("deeplink")
-        or data.get("verification_url")
-    )
+verify_url = (
+    data.get("authorizationRequestUri")
+    or data.get("authorizationRequestQrUri")
+    or data.get("verify_url")
+    or data.get("url")
+)
+
 
     if not verify_url:
         raise HTTPException(status_code=500, detail=f"Paradym API did not return a verify URL: {data}")
@@ -116,7 +117,11 @@ async def create_request(req: PresentationRequest):
     print(f"[DEBUG] ✅ Paradym verify link created for {request_id}")
     print(f"[DEBUG] 🔗 Verify URL (QR Link): {verify_url}")
 
-    return {"request_id": request_id, "openid_url": verify_url}
+    return {
+  "request_id": request_id,
+  "openid_url": verify_url  # dit is de Paradym link
+}
+
 
 # -----------------------------------------------------
 # 2️⃣ Receive presentation result (callback from Paradym)
@@ -165,4 +170,5 @@ async def serve_frontend():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
 

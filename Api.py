@@ -1,20 +1,22 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Dict, Any, Optional, List
 from datetime import datetime
-from urllib.parse import urlencode
-import uuid, secrets, json, os, base64
+import httpx, os, uuid, secrets, json
 
 # -----------------------------------------------------
 # INIT
 # -----------------------------------------------------
-app = FastAPI(title="Paradym Login Verifier API")
+app = FastAPI(title="Paradym Login Verifier API (via official API)")
 
 BASE_URL = os.getenv("BASE_URL", "https://dockerapi-aika.onrender.com")
 PARADYM_BASE = "https://paradym.id"
+PARADYM_API_KEY = os.getenv("PARADYM_API_KEY")
+
+if not PARADYM_API_KEY:
+    print("⚠️  Warning: PARADYM_API_KEY is not set. Add it to your environment variables.")
 
 # -----------------------------------------------------
 # MIDDLEWARE
@@ -26,16 +28,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# -----------------------------------------------------
-# STATIC FILES SETUP
-# -----------------------------------------------------
-base_dir = os.path.dirname(os.path.abspath(__file__))
-definitions_dir = os.path.join(base_dir, "definitions")
-os.makedirs(definitions_dir, exist_ok=True)
-
-# ✅ serve definition JSONs publicly
-app.mount("/definitions", StaticFiles(directory=definitions_dir), name="definitions")
 
 # -----------------------------------------------------
 # DATA STORE
@@ -51,46 +43,28 @@ class PresentationRequest(BaseModel):
     requested_credentials: Optional[List[str]] = ["VerifiableId"]
 
 # -----------------------------------------------------
-# HELPERS
-# -----------------------------------------------------
-def decode_base64url(data: str) -> bytes:
-    data = data.replace("-", "+").replace("_", "/")
-    padding = 4 - len(data) % 4
-    if padding != 4:
-        data += "=" * padding
-    return base64.b64decode(data)
-
-def parse_jwt(token: str) -> Dict[str, Any]:
-    parts = token.split(".")
-    if len(parts) != 3:
-        raise ValueError("Invalid JWT")
-    header = json.loads(decode_base64url(parts[0]))
-    payload = json.loads(decode_base64url(parts[1]))
-    return {"header": header, "payload": payload}
-
-# -----------------------------------------------------
 # ROUTES
 # -----------------------------------------------------
 @app.get("/")
 async def root():
-    return {"status": "running", "service": "Paradym Login Verifier"}
+    return {
+        "status": "running",
+        "service": "Paradym Login Verifier (via official API)"
+    }
 
 # -----------------------------------------------------
-# 1️⃣ Create presentation request
+# 1️⃣ Create verification request (via Paradym API)
 # -----------------------------------------------------
 @app.post("/request/create")
 async def create_request(req: PresentationRequest):
     request_id = str(uuid.uuid4())
     state = secrets.token_urlsafe(32)
-    nonce = secrets.token_urlsafe(32)
 
-    # ✅ Presentation Definition (Paradym expects "format" to be defined)
-    definition = {
+    # Construct presentation definition (same format as docs)
+    presentation_definition = {
         "id": request_id,
         "format": {
-            "jwt_vp": {
-                "alg": ["ES256", "EdDSA"]
-            }
+            "jwt_vp": {"alg": ["ES256", "EdDSA"]}
         },
         "input_descriptors": [{
             "id": "login_credential",
@@ -111,40 +85,48 @@ async def create_request(req: PresentationRequest):
         }]
     }
 
-    # ✅ Save definition so Paradym can fetch it
-    definition_path = os.path.join(definitions_dir, f"{request_id}.json")
-    with open(definition_path, "w") as f:
-        json.dump(definition, f)
+    payload = {
+        "presentation_definition": presentation_definition,
+        "redirect_uri": f"{BASE_URL}/presentation/{request_id}",
+        "state": state
+    }
+
+    headers = {
+        "Authorization": f"Bearer {PARADYM_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    print("[DEBUG] Creating verification request via Paradym API...")
+    print(f"[DEBUG] Payload: {json.dumps(payload, indent=2)}")
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        resp = await client.post(f"{PARADYM_BASE}/api/verify", headers=headers, json=payload)
+
+    if resp.status_code != 200:
+        print(f"[ERROR] Paradym API response: {resp.text}")
+        raise HTTPException(status_code=resp.status_code, detail=resp.text)
+
+    data = resp.json()
+    verify_url = data.get("verify_url")
+
+    if not verify_url:
+        raise HTTPException(status_code=500, detail="Missing verify_url from Paradym response")
 
     sessions[request_id] = {
-        "state": state,
         "status": "pending",
+        "state": state,
         "issuer": req.issuer,
         "created": datetime.utcnow().isoformat(),
+        "verify_url": verify_url
     }
 
-    presentation_definition_uri = f"{BASE_URL}/definitions/{request_id}.json"
-    print(f"[DEBUG] ✅ New request created: {request_id}")
-    print(f"[DEBUG] Definition URL: {presentation_definition_uri}")
+    print(f"[DEBUG] ✅ Paradym verify link created for {request_id}")
+    print(f"[DEBUG] Open link (or QR): {verify_url}")
 
-    params = {
-        "response_type": "vp_token",
-        "client_id": f"{BASE_URL}/client",
-        "redirect_uri": f"{BASE_URL}/presentation/{request_id}",
-        "response_mode": "direct_post",
-        "state": state,
-        "nonce": nonce,
-        "presentation_definition_uri": presentation_definition_uri
-    }
-
-    # ✅ Use OpenID4VP deep link (opens Paradym app)
-    openid_url = f"openid4vp://?{urlencode(params)}"
-    print(f"[DEBUG] OpenID4VP link: {openid_url}")
-
-    return {"request_id": request_id, "openid_url": openid_url}
+    return {"request_id": request_id, "openid_url": verify_url}
 
 # -----------------------------------------------------
-# 2️⃣ Receive presentation from Paradym Wallet
+# 2️⃣ Receive presentation result (Paradym callback)
 # -----------------------------------------------------
 @app.post("/presentation/{request_id}")
 async def receive_presentation(request_id: str, request: Request):
@@ -152,33 +134,26 @@ async def receive_presentation(request_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Request not found")
 
     data = await request.json()
-    print(f"[DEBUG] Received presentation for {request_id}:\n{json.dumps(data, indent=2)}")
+    print(f"[DEBUG] ✅ Received callback from Paradym for {request_id}")
+    print(json.dumps(data, indent=2))
 
-    vp_token = data.get("vp_token")
-    state = data.get("state")
-
-    if state != sessions[request_id]["state"]:
-        raise HTTPException(status_code=400, detail="Invalid state")
-
-    parsed = parse_jwt(vp_token)
-    payload = parsed["payload"]
-    holder = payload.get("iss") or payload.get("sub")
+    holder = data.get("holder")
+    verified = data.get("verified", False)
 
     sessions[request_id].update({
-        "status": "completed",
+        "status": "completed" if verified else "failed",
         "holder": holder,
-        "payload": payload,
+        "result": data,
         "completed_at": datetime.utcnow().isoformat()
     })
 
-    print(f"[DEBUG] ✅ Presentation completed for {holder}")
-    return {"success": True}
+    return {"success": True, "verified": verified}
 
 # -----------------------------------------------------
-# 3️⃣ Check presentation status
+# 3️⃣ Check session status
 # -----------------------------------------------------
 @app.get("/presentation/{request_id}/status")
-async def status(request_id: str):
+async def get_status(request_id: str):
     if request_id not in sessions:
         raise HTTPException(status_code=404, detail="Not found")
     return sessions[request_id]
@@ -188,7 +163,7 @@ async def status(request_id: str):
 # -----------------------------------------------------
 @app.get("/frontend")
 async def serve_frontend():
-    path = os.path.join(base_dir, "index.html")
+    path = os.path.join(os.path.dirname(__file__), "index.html")
     return FileResponse(path)
 
 # -----------------------------------------------------

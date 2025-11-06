@@ -54,8 +54,8 @@ app.add_middleware(
 # Entra Verified ID configuratie
 # Vul deze 2 in vanuit je app-registratie
 # -----------------------------
-AZURE_CLIENT_ID = "780eaf2e-e0a9-421f-8ec3-006c13b504d0"
-AZURE_TENANT_ID = "39d28fd2-8cad-4518-b104-f0d193a7d451"
+AZURE_CLIENT_ID = "890f483a-c351-4981-9326-7ff215b918c5"
+AZURE_TENANT_ID = "bf26019d-d50a-4e96-be5c-6f64d199b433"
 AZURE_REDIRECT_URI = "https://dockerapi-aika.onrender.com/presentation/callback"
 
 
@@ -254,3 +254,4 @@ def presentation_status(request_id: str):
 @app.get("/health")
 def health():
     return {"ok": True, "time": now_iso()}
+

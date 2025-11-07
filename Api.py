@@ -17,27 +17,27 @@ BASE_URL = os.getenv("BASE_URL", "https://dockerapi-aika.onrender.com")
 PARADYM_BASE = "https://api.paradym.id"
 PARADYM_API_KEY = os.getenv(
     "PARADYM_API_KEY",
-    "paradym_e230f2ddfe60f9f3b74137e538354863015a678e98336a04a099a22215cea79c"
+    "paradym_e230f2ddfe60f9f3b74137e538354863015a678e98336a04a099a22215cea79c"  # demo key
 )
 PROJECT_ID = os.getenv("PARADYM_PROJECT_ID", "cmhnkcs29000601s6dimvb8hh")
 PRESENTATION_TEMPLATE_ID = os.getenv("PARADYM_TEMPLATE_ID", "cmho2guje00dds601ym08hk7f")
 
 if not PARADYM_API_KEY or not PROJECT_ID or not PRESENTATION_TEMPLATE_ID:
-    print("⚠️  Let op: PARADYM_API_KEY, PROJECT_ID of PRESENTATION_TEMPLATE_ID ontbreekt of is niet geldig.")
+    print("⚠️  PARADYM_API_KEY, PROJECT_ID of PRESENTATION_TEMPLATE_ID ontbreekt of is niet geldig.", flush=True)
 
 # -----------------------------------------------------
 # MIDDLEWARE
 # -----------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],       # POC: open CORS
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # -----------------------------------------------------
-# DATA STORE
+# DATA STORE (in-memory)
 # -----------------------------------------------------
 sessions: Dict[str, Any] = {}
 
@@ -79,7 +79,7 @@ async def root():
     }
 
 # -----------------------------------------------------
-# 1️⃣ Create verification request
+# 1) Create verification request
 # -----------------------------------------------------
 @app.post("/request/create")
 async def create_request(req: PresentationRequest):
@@ -112,54 +112,75 @@ async def create_request(req: PresentationRequest):
         raise HTTPException(status_code=resp.status_code, detail=resp.text)
 
     data = resp.json()
-    link = data.get("authorizationRequestUri")
+    link = data.get("authorizationRequestUri") or data.get("verify_url") or data.get("url")
     qr_link = data.get("authorizationRequestQrUri") or link
 
     if not link:
-        raise HTTPException(status_code=500, detail=f"Paradym API returned no link: {data}")
+        raise HTTPException(status_code=500, detail=f"Paradym API returned no authorizationRequestUri: {data}")
 
+    # Bewaar sessie
     sessions[request_id] = {
         "status": "pending",
+        "verified": False,
         "state": state,
         "issuer": req.issuer,
         "created_at": now_iso(),
         "link_url": link,
         "qr_url": qr_link,
-        "raw": data,
+        "raw_paradym": data
     }
 
     safe_print(f"[DEBUG] ✅ Created verify link for {request_id}")
-    safe_print(f"[DEBUG] 🔗 {link}")
+    safe_print(f"[DEBUG] 🔗 Link: {link}")
+    safe_print(f"[DEBUG] 🔳 QR:   {qr_link}")
 
     return {"request_id": request_id, "openid_url": link, "openid_qr_url": qr_link}
 
 # -----------------------------------------------------
-# 2️⃣ Receive presentation result
+# 2) Receive presentation result (Paradym callback)
 # -----------------------------------------------------
 @app.post("/presentation/{request_id}")
 async def receive_presentation(request_id: str, request: Request):
-    safe_print(f"[DEBUG] 📩 Callback from Paradym: {request_id}")
+    safe_print(f"[DEBUG] 📩 Callback from Paradym for request_id: {request_id}")
 
+    # Als de process herstartte en sessie er niet is, maak 'm aan
     if request_id not in sessions:
         sessions[request_id] = {"status": "pending", "created_at": now_iso()}
+        safe_print(f"[WARN] Session not found for {request_id}; created placeholder.")
 
-    content_type = request.headers.get("content-type", "")
-    body = {}
+    # Debug: headers + query
     try:
-        if "json" in content_type:
+        headers_dump = {k: v for k, v in request.headers.items()}
+        safe_print(f"[DEBUG] Headers:\n{json.dumps(headers_dump, indent=2)}")
+        safe_print(f"[DEBUG] Query: {dict(request.query_params)}")
+    except Exception:
+        pass
+
+    # Parse body: JSON -> form-urlencoded -> raw
+    content_type = (request.headers.get("content-type") or "").lower()
+    body: Dict[str, Any] = {}
+    try:
+        if "application/json" in content_type:
             body = await request.json()
-        elif "form" in content_type:
-            parsed = parse_qs((await request.body()).decode())
-            body = {k: v[0] if isinstance(v, list) and len(v) == 1 else v for k, v in parsed.items()}
+            safe_print(f"[DEBUG] ✅ JSON body:\n{json.dumps(body, indent=2)}")
+        elif "application/x-www-form-urlencoded" in content_type:
+            raw = (await request.body()).decode("utf-8", errors="ignore")
+            parsed = parse_qs(raw)
+            body = {k: (v[0] if isinstance(v, list) and len(v) == 1 else v) for k, v in parsed.items()}
+            safe_print(f"[DEBUG] ✅ FORM body:\n{json.dumps(body, indent=2)}")
         else:
-            raw = (await request.body()).decode()
+            raw = (await request.body()).decode("utf-8", errors="ignore")
+            safe_print(f"[DEBUG] ✅ RAW body (type='{content_type}'):\n{raw}")
             try:
                 body = json.loads(raw)
+                safe_print(f"[DEBUG] ✅ RAW parsed as JSON:\n{json.dumps(body, indent=2)}")
             except Exception:
-                body = {"raw": raw}
+                body = {"raw_body": raw}
     except Exception as e:
-        body = {"error": str(e)}
+        traceback.print_exc(file=sys.stdout)
+        body = {"parse_error": str(e)}
 
+    # Markeer verified (default True als veld ontbreekt; pas aan naar jouw logica)
     verified = bool(body.get("verified", True))
     holder = body.get("holder") or body.get("subject") or "Onbekend"
 
@@ -175,7 +196,7 @@ async def receive_presentation(request_id: str, request: Request):
     return JSONResponse({"success": True, "verified": verified})
 
 # -----------------------------------------------------
-# 3️⃣ Status
+# 3) Status & debug
 # -----------------------------------------------------
 @app.get("/presentation/{request_id}/status")
 async def get_status(request_id: str):
@@ -183,8 +204,18 @@ async def get_status(request_id: str):
         raise HTTPException(status_code=404, detail="Not found")
     return sessions[request_id]
 
+@app.get("/presentation/{request_id}/raw")
+async def get_raw(request_id: str):
+    if request_id not in sessions:
+        raise HTTPException(status_code=404, detail="Not found")
+    raw = sessions[request_id].get("result") or {}
+    try:
+        return JSONResponse(raw)
+    except Exception:
+        return PlainTextResponse(str(raw))
+
 # -----------------------------------------------------
-# 4️⃣ Frontend
+# 4) Serve frontend files
 # -----------------------------------------------------
 @app.get("/frontend")
 async def serve_frontend():
@@ -193,8 +224,16 @@ async def serve_frontend():
         raise HTTPException(status_code=404, detail="Frontend file not found")
     return FileResponse(path)
 
+@app.get("/dashboard.html")
+async def serve_dashboard():
+    path = os.path.join(os.path.dirname(__file__), "dashboard.html")
+    if not os.path.exists(path):
+        # simpele fallback zodat de redirect niet faalt
+        return PlainTextResponse("Dashboard placeholder: upload dashboard.html naast je API-bestand.")
+    return FileResponse(path)
+
 # -----------------------------------------------------
-# RUN
+# RUN (local)
 # -----------------------------------------------------
 if __name__ == "__main__":
     import uvicorn

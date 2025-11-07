@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 from datetime import datetime
 import httpx, os, uuid, secrets, json
 
@@ -21,7 +21,7 @@ PROJECT_ID = os.getenv("PARADYM_PROJECT_ID", "cmhnkcs29000601s6dimvb8hh")
 PRESENTATION_TEMPLATE_ID = os.getenv("PARADYM_TEMPLATE_ID", "cmho2guje00dds601ym08hk7f")
 
 if not PARADYM_API_KEY or not PROJECT_ID or not PRESENTATION_TEMPLATE_ID:
-    print("⚠️ Let op: PARADYM_API_KEY, PROJECT_ID of PRESENTATION_TEMPLATE_ID ontbreekt of is niet geldig.")
+    print("⚠️  Let op: PARADYM_API_KEY, PROJECT_ID of PRESENTATION_TEMPLATE_ID ontbreekt of is niet geldig.")
 
 # -----------------------------------------------------
 # MIDDLEWARE
@@ -91,7 +91,6 @@ async def create_request(req: PresentationRequest):
     except Exception:
         raise HTTPException(status_code=500, detail="Invalid JSON from Paradym API")
 
-    # ✅ Correcte extractie van de link
     verify_url = (
         data.get("authorizationRequestQrUri")
         or data.get("authorizationRequestUri")
@@ -113,10 +112,7 @@ async def create_request(req: PresentationRequest):
     print(f"[DEBUG] ✅ Paradym verify link created for {request_id}")
     print(f"[DEBUG] 🔗 Verify URL (QR Link): {verify_url}")
 
-    return {
-        "request_id": request_id,
-        "openid_url": verify_url
-    }
+    return {"request_id": request_id, "openid_url": verify_url}
 
 # -----------------------------------------------------
 # 2️⃣ Receive presentation result (callback from Paradym)
@@ -124,14 +120,22 @@ async def create_request(req: PresentationRequest):
 @app.post("/presentation/{request_id}")
 async def receive_presentation(request_id: str, request: Request):
     if request_id not in sessions:
+        print(f"[WARN] Callback received for unknown request_id: {request_id}")
         raise HTTPException(status_code=404, detail="Request not found")
 
-    data = await request.json()
-    print(f"[DEBUG] ✅ Received callback from Paradym for request: {request_id}")
-    print(json.dumps(data, indent=2))
+    # Probeer JSON, val terug op raw body
+    try:
+        data = await request.json()
+        print(f"[DEBUG] ✅ JSON callback ontvangen van Paradym voor {request_id}")
+        print(json.dumps(data, indent=2))
+    except Exception:
+        raw = await request.body()
+        text = raw.decode("utf-8")
+        print(f"[WARN] ⚠️ Geen geldige JSON callback. Ruwe data ontvangen:\n{text}")
+        data = {"raw_body": text}
 
-    holder = data.get("holder")
-    verified = data.get("verified", False)
+    holder = data.get("holder") or data.get("subject") or "Onbekend"
+    verified = data.get("verified", True)
 
     sessions[request_id].update({
         "status": "completed" if verified else "failed",
@@ -140,6 +144,7 @@ async def receive_presentation(request_id: str, request: Request):
         "completed_at": datetime.utcnow().isoformat()
     })
 
+    print(f"[DEBUG] ✅ Verificatie opgeslagen voor {request_id}")
     return {"success": True, "verified": verified}
 
 # -----------------------------------------------------

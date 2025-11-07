@@ -27,7 +27,7 @@ PRESENTATION_TEMPLATE_ID = os.getenv("PARADYM_TEMPLATE_ID", "cmho2guje00dds601ym
 # -----------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # vrij voor POC
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -56,6 +56,30 @@ def safe_print(msg: str):
         print(msg, flush=True)
     except Exception:
         pass
+
+# -----------------------------------------------------
+# PARADYM STATUS HELPER
+# -----------------------------------------------------
+async def get_paradym_status(presentation_id: str) -> dict:
+    """
+    Haalt actuele verificatiestatus rechtstreeks op bij Paradym.
+    """
+    url = f"{PARADYM_BASE}/v1/presentations/{presentation_id}"
+    headers = {"x-access-token": PARADYM_API_KEY}
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.get(url, headers=headers)
+        if resp.status_code != 200:
+            safe_print(f"[WARN] Paradym status check failed ({resp.status_code}): {resp.text}")
+            return {"error": f"{resp.status_code}", "raw": resp.text}
+
+    try:
+        data = resp.json()
+    except Exception as e:
+        safe_print(f"[ERROR] Invalid JSON from Paradym: {e}")
+        return {"error": "invalid_json", "raw": resp.text}
+
+    return data
 
 # -----------------------------------------------------
 # ROUTES
@@ -98,34 +122,16 @@ async def create_request(req: PresentationRequest):
             resp = await client.post(api_url, headers=headers, json=payload)
         except Exception as e:
             safe_print(f"[ERROR] Paradym API connection failed: {e}")
-            return JSONResponse(
-                status_code=500,
-                content={"error": "Paradym API connection failed", "details": str(e)},
-            )
+            return JSONResponse(status_code=500, content={"error": str(e)})
 
     if resp.status_code not in (200, 201):
         safe_print(f"[ERROR] Paradym API returned {resp.status_code}: {resp.text}")
-        return JSONResponse(
-            status_code=resp.status_code,
-            content={"error": "Paradym API failed", "response": resp.text},
-        )
+        return JSONResponse(status_code=resp.status_code, content={"error": resp.text})
 
-    try:
-        data = resp.json()
-    except Exception as e:
-        safe_print(f"[ERROR] Paradym response not JSON: {e}\n{resp.text}")
-        return JSONResponse(
-            status_code=500,
-            content={"error": "Invalid JSON response from Paradym", "raw": resp.text},
-        )
-
+    data = resp.json()
     link = data.get("authorizationRequestUri")
     qr_link = data.get("authorizationRequestQrUri") or link
-    if not link:
-        return JSONResponse(
-            status_code=500,
-            content={"error": "Paradym API did not return authorizationRequestUri", "raw": data},
-        )
+    pres_id = data.get("id")
 
     sessions[request_id] = {
         "status": "pending",
@@ -134,64 +140,14 @@ async def create_request(req: PresentationRequest):
         "created_at": now_iso(),
         "link_url": link,
         "qr_url": qr_link,
+        "presentation_id": pres_id,  # bewaren voor latere lookup
     }
 
     safe_print(f"[DEBUG] ✅ Created verification request {request_id}")
-    safe_print(f"[DEBUG] 🔗 {link}")
-    safe_print(f"[DEBUG] 🔳 {qr_link}")
-
-    return JSONResponse(
-        content={
-            "request_id": request_id,
-            "openid_url": link,
-            "openid_qr_url": qr_link
-        }
-    )
+    return {"request_id": request_id, "openid_url": link, "openid_qr_url": qr_link}
 
 # -----------------------------------------------------
-# 2️⃣ Receive presentation result (POST)
-# -----------------------------------------------------
-@app.post("/presentation/{request_id}")
-async def receive_presentation(request_id: str, request: Request):
-    safe_print(f"[DEBUG] 📩 POST Callback received for {request_id}")
-
-    if request_id not in sessions:
-        sessions[request_id] = {"status": "pending", "created_at": now_iso()}
-        safe_print(f"[WARN] Created new session for unknown request_id {request_id}")
-
-    content_type = (request.headers.get("content-type") or "").lower()
-    body = {}
-    try:
-        if "json" in content_type:
-            body = await request.json()
-        elif "form" in content_type:
-            parsed = parse_qs((await request.body()).decode())
-            body = {k: v[0] if isinstance(v, list) else v for k, v in parsed.items()}
-        else:
-            raw = (await request.body()).decode()
-            try:
-                body = json.loads(raw)
-            except Exception:
-                body = {"raw_body": raw}
-    except Exception as e:
-        body = {"parse_error": str(e)}
-
-    verified = bool(body.get("verified", True))
-    holder = body.get("holder") or body.get("subject") or "Onbekend"
-
-    sessions[request_id].update({
-        "status": "completed" if verified else "failed",
-        "verified": verified,
-        "holder": holder,
-        "result": body,
-        "completed_at": now_iso(),
-    })
-
-    safe_print(f"[DEBUG] ✅ Stored verification (POST) for {request_id}")
-    return JSONResponse({"success": True, "verified": verified})
-
-# -----------------------------------------------------
-# 2️⃣b Receive presentation result (GET redirect)
+# 2️⃣ Receive presentation result (Paradym redirect fallback)
 # -----------------------------------------------------
 @app.get("/presentation/{request_id}")
 async def presentation_redirect(request_id: str, request: Request):
@@ -216,13 +172,31 @@ async def presentation_redirect(request_id: str, request: Request):
     return PlainTextResponse("✅ Verificatie voltooid, je mag dit venster sluiten.")
 
 # -----------------------------------------------------
-# 3️⃣ Check status
+# 3️⃣ Check status (with Paradym API fallback)
 # -----------------------------------------------------
 @app.get("/presentation/{request_id}/status")
 async def get_status(request_id: str):
     if request_id not in sessions:
         raise HTTPException(status_code=404, detail="Not found")
-    return sessions[request_id]
+
+    sess = sessions[request_id]
+
+    if sess.get("status") == "pending":
+        # rechtstreeks status bij Paradym ophalen
+        paradym_id = sess.get("presentation_id") or request_id
+        result = await get_paradym_status(paradym_id)
+        paradym_status = (result.get("status") or "").lower()
+
+        if paradym_status in ("verified", "completed", "success"):
+            sess.update({
+                "status": "completed",
+                "verified": True,
+                "result": result,
+                "completed_at": now_iso(),
+            })
+            safe_print(f"[DEBUG] ✅ Updated status from Paradym for {request_id}")
+
+    return sess
 
 # -----------------------------------------------------
 # 4️⃣ Serve frontend

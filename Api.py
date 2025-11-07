@@ -80,39 +80,26 @@ async def create_request(req: PresentationRequest):
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(api_url, headers=headers, json=payload)
 
-    print(f"[DEBUG] Paradym API response status: {resp.status_code}")
-    print(f"[DEBUG] Paradym API raw text: {resp.text}")
-
     if resp.status_code not in (200, 201):
         raise HTTPException(status_code=resp.status_code, detail=resp.text)
 
-    try:
-        data = resp.json()
-    except Exception:
-        raise HTTPException(status_code=500, detail="Invalid JSON from Paradym API")
-
-    verify_url = (
-        data.get("authorizationRequestQrUri")
-        or data.get("authorizationRequestUri")
-        or data.get("verify_url")
-        or data.get("url")
-    )
-
-    if not verify_url:
-        raise HTTPException(status_code=500, detail=f"Paradym API did not return a verify URL: {data}")
+    data = resp.json()
+    verify_url = data.get("authorizationRequestQrUri") or data.get("authorizationRequestUri")
 
     sessions[request_id] = {
         "status": "pending",
-        "state": state,
-        "issuer": req.issuer,
+        "verify_url": verify_url,
         "created": datetime.utcnow().isoformat(),
-        "verify_url": verify_url
     }
 
     print(f"[DEBUG] ✅ Paradym verify link created for {request_id}")
-    print(f"[DEBUG] 🔗 Verify URL (QR Link): {verify_url}")
+    print(f"[DEBUG] 🔗 Verify URL: {verify_url}")
 
-    return {"request_id": request_id, "openid_url": verify_url}
+    return {
+        "request_id": request_id,
+        "openid_url": verify_url
+    }
+
 
 # -----------------------------------------------------
 # 2️⃣ Receive presentation result (callback from Paradym)
@@ -170,3 +157,4 @@ async def serve_frontend():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+

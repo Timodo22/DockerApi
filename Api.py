@@ -19,7 +19,7 @@ PARADYM_API_KEY = os.getenv(
     "PARADYM_API_KEY",
     "paradym_e230f2ddfe60f9f3b74137e538354863015a678e98336a04a099a22215cea79c"  # demo key
 )
-PROJECT_ID = os.getenv("PARADYM_PROJECT_ID", "cmhnkcs29000601s6dimvb8hh")
+PROJECT_ID = os.getenv("PARADYM_PROJECT_ID", "cmhowizsb00i0s601kmfkmews")
 PRESENTATION_TEMPLATE_ID = os.getenv("PARADYM_TEMPLATE_ID", "cmhowgmzr00hzs601pti9vpos")
 
 # -----------------------------------------------------
@@ -224,6 +224,7 @@ if __name__ == "__main__":
     import uvicorn
     safe_print("🚀 Starting Paradym Login Verifier API on port 8000")
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
 
 
 

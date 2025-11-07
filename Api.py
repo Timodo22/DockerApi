@@ -62,9 +62,9 @@ def safe_print(msg: str):
 # -----------------------------------------------------
 async def get_paradym_status(presentation_id: str) -> dict:
     """
-    Haalt actuele verificatiestatus rechtstreeks op bij Paradym.
+    Haalt actuele verificatiestatus rechtstreeks op bij Paradym (project request endpoint).
     """
-    url = f"{PARADYM_BASE}/v1/presentations/{presentation_id}"
+    url = f"{PARADYM_BASE}/v1/projects/{PROJECT_ID}/openid4vc/verification/request/{presentation_id}"
     headers = {"x-access-token": PARADYM_API_KEY}
 
     async with httpx.AsyncClient(timeout=15.0) as client:
@@ -80,6 +80,7 @@ async def get_paradym_status(presentation_id: str) -> dict:
         return {"error": "invalid_json", "raw": resp.text}
 
     return data
+
 
 # -----------------------------------------------------
 # ROUTES
@@ -222,3 +223,4 @@ if __name__ == "__main__":
     import uvicorn
     safe_print("🚀 Starting Paradym Login Verifier API on port 8000")
     uvicorn.run(app, host="0.0.0.0", port=8000)
+

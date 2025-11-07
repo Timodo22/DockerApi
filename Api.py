@@ -22,22 +22,19 @@ PARADYM_API_KEY = os.getenv(
 PROJECT_ID = os.getenv("PARADYM_PROJECT_ID", "cmhnkcs29000601s6dimvb8hh")
 PRESENTATION_TEMPLATE_ID = os.getenv("PARADYM_TEMPLATE_ID", "cmho2guje00dds601ym08hk7f")
 
-if not PARADYM_API_KEY or not PROJECT_ID or not PRESENTATION_TEMPLATE_ID:
-    print("⚠️  PARADYM_API_KEY, PROJECT_ID of PRESENTATION_TEMPLATE_ID ontbreekt of is niet geldig.", flush=True)
-
 # -----------------------------------------------------
 # MIDDLEWARE
 # -----------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],       # POC: open CORS
+    allow_origins=["*"],  # vrij voor POC
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # -----------------------------------------------------
-# DATA STORE (in-memory)
+# DATA STORE
 # -----------------------------------------------------
 sessions: Dict[str, Any] = {}
 
@@ -63,10 +60,6 @@ def safe_print(msg: str):
 # -----------------------------------------------------
 # ROUTES
 # -----------------------------------------------------
-@app.get("/healthz")
-async def healthz():
-    return {"ok": True, "service": "Paradym Login Verifier API"}
-
 @app.get("/")
 async def root():
     return {
@@ -79,7 +72,7 @@ async def root():
     }
 
 # -----------------------------------------------------
-# 1) Create verification request
+# 1️⃣ Create verification request
 # -----------------------------------------------------
 @app.post("/request/create")
 async def create_request(req: PresentationRequest):
@@ -98,89 +91,91 @@ async def create_request(req: PresentationRequest):
     }
 
     api_url = f"{PARADYM_BASE}/v1/projects/{PROJECT_ID}/openid4vc/verification/request"
-
-    safe_print(f"\n[DEBUG] Creating verification request: {api_url}")
-    safe_print(f"[DEBUG] Payload:\n{json.dumps(payload, indent=2)}")
+    safe_print(f"[DEBUG] Requesting Paradym verification:\n{json.dumps(payload, indent=2)}")
 
     async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(api_url, headers=headers, json=payload)
-
-    safe_print(f"[DEBUG] Paradym response: {resp.status_code}")
-    safe_print(f"[DEBUG] Raw text: {resp.text}\n")
+        try:
+            resp = await client.post(api_url, headers=headers, json=payload)
+        except Exception as e:
+            safe_print(f"[ERROR] Paradym API connection failed: {e}")
+            return JSONResponse(
+                status_code=500,
+                content={"error": "Paradym API connection failed", "details": str(e)},
+            )
 
     if resp.status_code not in (200, 201):
-        raise HTTPException(status_code=resp.status_code, detail=resp.text)
+        safe_print(f"[ERROR] Paradym API returned {resp.status_code}: {resp.text}")
+        return JSONResponse(
+            status_code=resp.status_code,
+            content={"error": "Paradym API failed", "response": resp.text},
+        )
 
-    data = resp.json()
-    link = data.get("authorizationRequestUri") or data.get("verify_url") or data.get("url")
+    try:
+        data = resp.json()
+    except Exception as e:
+        safe_print(f"[ERROR] Paradym response not JSON: {e}\n{resp.text}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Invalid JSON response from Paradym", "raw": resp.text},
+        )
+
+    link = data.get("authorizationRequestUri")
     qr_link = data.get("authorizationRequestQrUri") or link
-
     if not link:
-        raise HTTPException(status_code=500, detail=f"Paradym API returned no authorizationRequestUri: {data}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Paradym API did not return authorizationRequestUri", "raw": data},
+        )
 
-    # Bewaar sessie
     sessions[request_id] = {
         "status": "pending",
-        "verified": False,
         "state": state,
-        "issuer": req.issuer,
+        "verified": False,
         "created_at": now_iso(),
         "link_url": link,
         "qr_url": qr_link,
-        "raw_paradym": data
     }
 
-    safe_print(f"[DEBUG] ✅ Created verify link for {request_id}")
-    safe_print(f"[DEBUG] 🔗 Link: {link}")
-    safe_print(f"[DEBUG] 🔳 QR:   {qr_link}")
+    safe_print(f"[DEBUG] ✅ Created verification request {request_id}")
+    safe_print(f"[DEBUG] 🔗 {link}")
+    safe_print(f"[DEBUG] 🔳 {qr_link}")
 
-    return {"request_id": request_id, "openid_url": link, "openid_qr_url": qr_link}
+    return JSONResponse(
+        content={
+            "request_id": request_id,
+            "openid_url": link,
+            "openid_qr_url": qr_link
+        }
+    )
 
 # -----------------------------------------------------
-# 2) Receive presentation result (Paradym callback)
+# 2️⃣ Receive presentation result
 # -----------------------------------------------------
 @app.post("/presentation/{request_id}")
 async def receive_presentation(request_id: str, request: Request):
-    safe_print(f"[DEBUG] 📩 Callback from Paradym for request_id: {request_id}")
+    safe_print(f"[DEBUG] 📩 Callback received for {request_id}")
 
-    # Als de process herstartte en sessie er niet is, maak 'm aan
     if request_id not in sessions:
         sessions[request_id] = {"status": "pending", "created_at": now_iso()}
-        safe_print(f"[WARN] Session not found for {request_id}; created placeholder.")
+        safe_print(f"[WARN] Created new session for unknown request_id {request_id}")
 
-    # Debug: headers + query
-    try:
-        headers_dump = {k: v for k, v in request.headers.items()}
-        safe_print(f"[DEBUG] Headers:\n{json.dumps(headers_dump, indent=2)}")
-        safe_print(f"[DEBUG] Query: {dict(request.query_params)}")
-    except Exception:
-        pass
-
-    # Parse body: JSON -> form-urlencoded -> raw
     content_type = (request.headers.get("content-type") or "").lower()
-    body: Dict[str, Any] = {}
+    body = {}
     try:
-        if "application/json" in content_type:
+        if "json" in content_type:
             body = await request.json()
-            safe_print(f"[DEBUG] ✅ JSON body:\n{json.dumps(body, indent=2)}")
-        elif "application/x-www-form-urlencoded" in content_type:
-            raw = (await request.body()).decode("utf-8", errors="ignore")
-            parsed = parse_qs(raw)
-            body = {k: (v[0] if isinstance(v, list) and len(v) == 1 else v) for k, v in parsed.items()}
-            safe_print(f"[DEBUG] ✅ FORM body:\n{json.dumps(body, indent=2)}")
+        elif "form" in content_type:
+            parsed = parse_qs((await request.body()).decode())
+            body = {k: v[0] if isinstance(v, list) else v for k, v in parsed.items()}
         else:
-            raw = (await request.body()).decode("utf-8", errors="ignore")
-            safe_print(f"[DEBUG] ✅ RAW body (type='{content_type}'):\n{raw}")
+            raw = (await request.body()).decode()
             try:
                 body = json.loads(raw)
-                safe_print(f"[DEBUG] ✅ RAW parsed as JSON:\n{json.dumps(body, indent=2)}")
             except Exception:
                 body = {"raw_body": raw}
     except Exception as e:
-        traceback.print_exc(file=sys.stdout)
         body = {"parse_error": str(e)}
 
-    # Markeer verified (default True als veld ontbreekt; pas aan naar jouw logica)
     verified = bool(body.get("verified", True))
     holder = body.get("holder") or body.get("subject") or "Onbekend"
 
@@ -196,7 +191,7 @@ async def receive_presentation(request_id: str, request: Request):
     return JSONResponse({"success": True, "verified": verified})
 
 # -----------------------------------------------------
-# 3) Status & debug
+# 3️⃣ Check status
 # -----------------------------------------------------
 @app.get("/presentation/{request_id}/status")
 async def get_status(request_id: str):
@@ -204,36 +199,25 @@ async def get_status(request_id: str):
         raise HTTPException(status_code=404, detail="Not found")
     return sessions[request_id]
 
-@app.get("/presentation/{request_id}/raw")
-async def get_raw(request_id: str):
-    if request_id not in sessions:
-        raise HTTPException(status_code=404, detail="Not found")
-    raw = sessions[request_id].get("result") or {}
-    try:
-        return JSONResponse(raw)
-    except Exception:
-        return PlainTextResponse(str(raw))
-
 # -----------------------------------------------------
-# 4) Serve frontend files
+# 4️⃣ Serve frontend
 # -----------------------------------------------------
 @app.get("/frontend")
 async def serve_frontend():
     path = os.path.join(os.path.dirname(__file__), "index.html")
     if not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="Frontend file not found")
+        raise HTTPException(status_code=404, detail="Frontend not found")
     return FileResponse(path)
 
 @app.get("/dashboard.html")
 async def serve_dashboard():
     path = os.path.join(os.path.dirname(__file__), "dashboard.html")
     if not os.path.exists(path):
-        # simpele fallback zodat de redirect niet faalt
-        return PlainTextResponse("Dashboard placeholder: upload dashboard.html naast je API-bestand.")
+        return PlainTextResponse("Dashboard placeholder: upload dashboard.html naast dit bestand.")
     return FileResponse(path)
 
 # -----------------------------------------------------
-# RUN (local)
+# RUN LOCAL
 # -----------------------------------------------------
 if __name__ == "__main__":
     import uvicorn

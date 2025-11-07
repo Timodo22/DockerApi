@@ -2,9 +2,9 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 from datetime import datetime
-import httpx, os, uuid, secrets, json, sys, traceback
+import httpx, os, uuid, secrets, json
 from urllib.parse import parse_qs
 
 # -----------------------------------------------------
@@ -149,11 +149,11 @@ async def create_request(req: PresentationRequest):
     )
 
 # -----------------------------------------------------
-# 2️⃣ Receive presentation result
+# 2️⃣ Receive presentation result (POST)
 # -----------------------------------------------------
 @app.post("/presentation/{request_id}")
 async def receive_presentation(request_id: str, request: Request):
-    safe_print(f"[DEBUG] 📩 Callback received for {request_id}")
+    safe_print(f"[DEBUG] 📩 POST Callback received for {request_id}")
 
     if request_id not in sessions:
         sessions[request_id] = {"status": "pending", "created_at": now_iso()}
@@ -187,8 +187,33 @@ async def receive_presentation(request_id: str, request: Request):
         "completed_at": now_iso(),
     })
 
-    safe_print(f"[DEBUG] ✅ Stored verification for {request_id}")
+    safe_print(f"[DEBUG] ✅ Stored verification (POST) for {request_id}")
     return JSONResponse({"success": True, "verified": verified})
+
+# -----------------------------------------------------
+# 2️⃣b Receive presentation result (GET redirect)
+# -----------------------------------------------------
+@app.get("/presentation/{request_id}")
+async def presentation_redirect(request_id: str, request: Request):
+    safe_print(f"[DEBUG] 🌐 GET Redirect received for {request_id}")
+    params = dict(request.query_params)
+
+    verified = params.get("verified", "true").lower() == "true"
+    holder = params.get("holder") or params.get("subject") or "Onbekend"
+
+    if request_id not in sessions:
+        sessions[request_id] = {"status": "pending", "created_at": now_iso()}
+
+    sessions[request_id].update({
+        "status": "completed" if verified else "failed",
+        "verified": verified,
+        "holder": holder,
+        "result": params,
+        "completed_at": now_iso(),
+    })
+
+    safe_print(f"[DEBUG] ✅ Stored verification (GET) for {request_id}")
+    return PlainTextResponse("✅ Verificatie voltooid, je mag dit venster sluiten.")
 
 # -----------------------------------------------------
 # 3️⃣ Check status

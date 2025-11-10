@@ -3,24 +3,30 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 from typing import Dict, Any
-from datetime import datetime
-import httpx, os, uuid, secrets, json
+from datetime import datetime, timedelta
+import httpx, os, uuid, secrets, json, jwt
 from urllib.parse import parse_qs
 
 # -----------------------------------------------------
 # INIT
 # -----------------------------------------------------
-app = FastAPI(title="Paradym Login Verifier API (Official Paradym API)")
+app = FastAPI(title="Paradym Login Verifier API (met JWT ES256)")
 
 # ⚙️ Configuration
 BASE_URL = os.getenv("BASE_URL", "https://dockerapi-aika.onrender.com")
 PARADYM_BASE = "https://api.paradym.id"
 PARADYM_API_KEY = os.getenv(
     "PARADYM_API_KEY",
-    "paradym_e230f2ddfe60f9f3b74137e538354863015a678e98336a04a099a22215cea79c"  # demo key
+    "paradym_e230f2ddfe60f9f3b74137e538354863015a678e98336a04a099a22215cea79c"
 )
 PROJECT_ID = os.getenv("PARADYM_PROJECT_ID", "cmhnkcs29000601s6dimvb8hh")
 PRESENTATION_TEMPLATE_ID = os.getenv("PARADYM_TEMPLATE_ID", "cmhowizsb00i0s601kmfkmews")
+
+# JWT configuratie
+JWT_PRIVATE_KEY_PATH = os.getenv("JWT_PRIVATE_KEY_PATH")
+JWT_PUBLIC_KEY_PATH = os.getenv("JWT_PUBLIC_KEY_PATH")
+JWT_ISSUER = "ParadymVerifier"
+JWT_EXP_MINUTES = 15  # geldigheid van JWT in minuten
 
 # -----------------------------------------------------
 # MIDDLEWARE
@@ -57,13 +63,30 @@ def safe_print(msg: str):
     except Exception:
         pass
 
+def generate_jwt(subject: str) -> str:
+    """Genereer een ES256 JWT token."""
+    if not os.path.exists(JWT_PRIVATE_KEY_PATH):
+        raise RuntimeError("Private key ontbreekt. Genereer eerst ec_private.pem.")
+
+    with open(JWT_PRIVATE_KEY_PATH, "r") as f:
+        private_key = f.read()
+
+    now = datetime.utcnow()
+    payload = {
+        "sub": subject,
+        "iss": JWT_ISSUER,
+        "iat": now,
+        "exp": now + timedelta(minutes=JWT_EXP_MINUTES)
+    }
+
+    token = jwt.encode(payload, private_key, algorithm="ES256")
+    return token
+
 # -----------------------------------------------------
 # PARADYM STATUS HELPER
 # -----------------------------------------------------
 async def get_paradym_status(presentation_id: str) -> dict:
-    """
-    Haalt actuele verificatiestatus rechtstreeks op bij Paradym (correcte endpoint).
-    """
+    """Haalt actuele verificatiestatus op bij Paradym."""
     url = f"{PARADYM_BASE}/v1/projects/{PROJECT_ID}/openid4vc/verification/{presentation_id}"
     headers = {"x-access-token": PARADYM_API_KEY}
 
@@ -81,8 +104,6 @@ async def get_paradym_status(presentation_id: str) -> dict:
 
     return data
 
-
-
 # -----------------------------------------------------
 # ROUTES
 # -----------------------------------------------------
@@ -90,7 +111,7 @@ async def get_paradym_status(presentation_id: str) -> dict:
 async def root():
     return {
         "status": "running",
-        "service": "Paradym Login Verifier (Official API)",
+        "service": "Paradym Login Verifier (Official API + JWT)",
         "docs": "https://api.paradym.id/reference",
         "project_id": PROJECT_ID,
         "template_id": PRESENTATION_TEMPLATE_ID,
@@ -111,11 +132,7 @@ async def create_request(req: PresentationRequest):
         "state": state
     }
 
-    headers = {
-        "x-access-token": PARADYM_API_KEY,
-        "Content-Type": "application/json"
-    }
-
+    headers = {"x-access-token": PARADYM_API_KEY, "Content-Type": "application/json"}
     api_url = f"{PARADYM_BASE}/v1/projects/{PROJECT_ID}/openid4vc/verification/request"
     safe_print(f"[DEBUG] Requesting Paradym verification:\n{json.dumps(payload, indent=2)}")
 
@@ -142,14 +159,14 @@ async def create_request(req: PresentationRequest):
         "created_at": now_iso(),
         "link_url": link,
         "qr_url": qr_link,
-        "presentation_id": pres_id,  # bewaren voor latere lookup
+        "presentation_id": pres_id,
     }
 
     safe_print(f"[DEBUG] ✅ Created verification request {request_id}")
     return {"request_id": request_id, "openid_url": link, "openid_qr_url": qr_link}
 
 # -----------------------------------------------------
-# 2️⃣ Receive presentation result (Paradym redirect fallback)
+# 2️⃣ Receive presentation result (redirect)
 # -----------------------------------------------------
 @app.get("/presentation/{request_id}")
 async def presentation_redirect(request_id: str, request: Request):
@@ -174,7 +191,7 @@ async def presentation_redirect(request_id: str, request: Request):
     return PlainTextResponse("✅ Verificatie voltooid, je mag dit venster sluiten.")
 
 # -----------------------------------------------------
-# 3️⃣ Check status (with Paradym API fallback)
+# 3️⃣ Check status (+ JWT)
 # -----------------------------------------------------
 @app.get("/presentation/{request_id}/status")
 async def get_status(request_id: str):
@@ -184,7 +201,6 @@ async def get_status(request_id: str):
     sess = sessions[request_id]
 
     if sess.get("status") == "pending":
-        # rechtstreeks status bij Paradym ophalen
         paradym_id = sess.get("presentation_id") or request_id
         result = await get_paradym_status(paradym_id)
         paradym_status = (result.get("status") or "").lower()
@@ -198,10 +214,30 @@ async def get_status(request_id: str):
             })
             safe_print(f"[DEBUG] ✅ Updated status from Paradym for {request_id}")
 
+    # JWT genereren bij verified
+    if sess.get("verified") and "jwt_token" not in sess:
+        holder = sess.get("holder", "unknown")
+        jwt_token = generate_jwt(holder)
+        sess["jwt_token"] = jwt_token
+
     return sess
 
 # -----------------------------------------------------
-# 4️⃣ Serve frontend
+# 4️⃣ Public key endpoint (voor verificatie)
+# -----------------------------------------------------
+@app.get("/.well-known/jwks.json")
+async def jwks():
+    """Serve public key in JWK-formaat zodat anderen JWT’s kunnen verifiëren."""
+    if not os.path.exists(JWT_PUBLIC_KEY_PATH):
+        raise HTTPException(status_code=404, detail="Public key not found")
+
+    with open(JWT_PUBLIC_KEY_PATH, "r") as f:
+        pub_key = f.read()
+
+    return {"algorithm": "ES256", "public_key": pub_key, "issuer": JWT_ISSUER}
+
+# -----------------------------------------------------
+# 5️⃣ Frontend
 # -----------------------------------------------------
 @app.get("/frontend")
 async def serve_frontend():
@@ -222,11 +258,5 @@ async def serve_dashboard():
 # -----------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
-    safe_print("🚀 Starting Paradym Login Verifier API on port 8000")
+    safe_print("🚀 Starting Paradym Login Verifier API with JWT on port 8000")
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
-
-
-
-
-

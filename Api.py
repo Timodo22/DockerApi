@@ -9,7 +9,7 @@ import httpx, os, uuid, secrets, json, jwt
 # -----------------------------------------------------
 # INIT
 # -----------------------------------------------------
-app = FastAPI(title="Paradym Login Verifier API (met JWT ES256 ENV keys)")
+app = FastAPI(title="Paradym Login Verifier API (met JWT via Render Secret Files)")
 
 # ⚙️ Configuration
 BASE_URL = os.getenv("BASE_URL", "https://dockerapi-aika.onrender.com")
@@ -21,11 +21,27 @@ PARADYM_API_KEY = os.getenv(
 PROJECT_ID = os.getenv("PARADYM_PROJECT_ID", "cmhnkcs29000601s6dimvb8hh")
 PRESENTATION_TEMPLATE_ID = os.getenv("PARADYM_TEMPLATE_ID", "cmhowizsb00i0s601kmfkmews")
 
-# JWT configuratie (keys uit environment)
-JWT_PRIVATE_KEY = os.getenv("JWT_PRIVATE_KEY")
-JWT_PUBLIC_KEY = os.getenv("JWT_PUBLIC_KEY")
+# -----------------------------------------------------
+# JWT CONFIG via Render Secret Files
+# -----------------------------------------------------
+def read_secret_file(path: str) -> str:
+    try:
+        with open(path, "r") as f:
+            return f.read().strip()
+    except Exception as e:
+        print(f"[ERROR] Kon secret file niet lezen ({path}): {e}", flush=True)
+        return None
+
+JWT_PRIVATE_KEY = read_secret_file("/etc/secrets/ec_private.pem")
+JWT_PUBLIC_KEY = read_secret_file("/etc/secrets/ec_public.pem")
+
 JWT_ISSUER = "ParadymVerifier"
 JWT_EXP_MINUTES = 15  # geldigheid van token in minuten
+
+if not JWT_PRIVATE_KEY:
+    print("[WARN] ❌ Private key niet gevonden in /etc/secrets/ec_private.pem", flush=True)
+if not JWT_PUBLIC_KEY:
+    print("[WARN] ❌ Public key niet gevonden in /etc/secrets/ec_public.pem", flush=True)
 
 # -----------------------------------------------------
 # MIDDLEWARE
@@ -63,9 +79,9 @@ def safe_print(msg: str):
         pass
 
 def generate_jwt(subject: str) -> str:
-    """Genereer een ES256 JWT token op basis van de private key uit ENV."""
+    """Genereer een ES256 JWT token op basis van de private key uit /etc/secrets."""
     if not JWT_PRIVATE_KEY:
-        raise RuntimeError("Private key ontbreekt. Zet JWT_PRIVATE_KEY als environment variable in Render.")
+        raise RuntimeError("Private key ontbreekt. Plaats ec_private.pem als secret file in Render.")
 
     now = datetime.utcnow()
     payload = {
@@ -107,7 +123,7 @@ async def get_paradym_status(presentation_id: str) -> dict:
 async def root():
     return {
         "status": "running",
-        "service": "Paradym Login Verifier (Official API + JWT via ENV)",
+        "service": "Paradym Login Verifier (JWT via Render Secret Files)",
         "docs": "https://api.paradym.id/reference",
         "project_id": PROJECT_ID,
         "template_id": PRESENTATION_TEMPLATE_ID,
@@ -225,7 +241,7 @@ async def get_status(request_id: str):
 async def jwks():
     """Geeft de publieke sleutel terug zodat clients JWT's kunnen verifiëren."""
     if not JWT_PUBLIC_KEY:
-        raise HTTPException(status_code=404, detail="Public key not set in environment")
+        raise HTTPException(status_code=404, detail="Public key niet gevonden in /etc/secrets/ec_public.pem")
     return {"algorithm": "ES256", "public_key": JWT_PUBLIC_KEY, "issuer": JWT_ISSUER}
 
 # -----------------------------------------------------
@@ -250,5 +266,5 @@ async def serve_dashboard():
 # -----------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
-    safe_print("🚀 Starting Paradym Login Verifier API (ENV Keys) on port 8000")
+    safe_print("🚀 Starting Paradym Login Verifier API (Render Secret Files) on port 8000")
     uvicorn.run(app, host="0.0.0.0", port=8000)

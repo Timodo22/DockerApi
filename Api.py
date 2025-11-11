@@ -9,7 +9,7 @@ import httpx, os, uuid, secrets, json, jwt
 # -----------------------------------------------------
 # INIT
 # -----------------------------------------------------
-app = FastAPI(title="Paradym Login Verifier API (met directe JWT generatie)")
+app = FastAPI(title="Paradym Login Verifier API (met automatische JWT)")
 
 # ⚙️ Configuration
 BASE_URL = os.getenv("BASE_URL", "https://dockerapi-aika.onrender.com")
@@ -22,7 +22,7 @@ PROJECT_ID = os.getenv("PARADYM_PROJECT_ID", "cmhnkcs29000601s6dimvb8hh")
 PRESENTATION_TEMPLATE_ID = os.getenv("PARADYM_TEMPLATE_ID", "cmhowizsb00i0s601kmfkmews")
 
 # -----------------------------------------------------
-# JWT CONFIG via Render Secret Files
+# JWT CONFIG
 # -----------------------------------------------------
 def read_secret_file(path: str) -> str:
     try:
@@ -34,14 +34,13 @@ def read_secret_file(path: str) -> str:
 
 JWT_PRIVATE_KEY = read_secret_file("/etc/secrets/ec_private.pem")
 JWT_PUBLIC_KEY = read_secret_file("/etc/secrets/ec_public.pem")
-
 JWT_ISSUER = "ParadymVerifier"
-JWT_EXP_MINUTES = 15  # geldigheid van token in minuten
+JWT_EXP_MINUTES = 15
 
 if not JWT_PRIVATE_KEY:
-    print("[WARN] ❌ Private key niet gevonden in /etc/secrets/ec_private.pem", flush=True)
+    print("[WARN] ❌ Private key niet gevonden")
 if not JWT_PUBLIC_KEY:
-    print("[WARN] ❌ Public key niet gevonden in /etc/secrets/ec_public.pem", flush=True)
+    print("[WARN] ❌ Public key niet gevonden")
 
 # -----------------------------------------------------
 # MIDDLEWARE
@@ -53,6 +52,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# -----------------------------------------------------
+# DATA STORE (in-memory)
+# -----------------------------------------------------
+sessions: Dict[str, Any] = {}
 
 # -----------------------------------------------------
 # MODELS
@@ -67,29 +71,45 @@ class PresentationRequest(BaseModel):
 def now_iso() -> str:
     return datetime.utcnow().isoformat()
 
-def generate_jwt(payload: dict) -> str:
-    """Genereer een ES256 JWT token op basis van de private key uit /etc/secrets."""
+def safe_print(msg: str):
+    try:
+        print(msg, flush=True)
+    except Exception:
+        pass
+
+def generate_jwt(holder: str, attrs: dict = None) -> str:
+    """Genereer JWT met ES256."""
     if not JWT_PRIVATE_KEY:
-        raise RuntimeError("Private key ontbreekt. Plaats ec_private.pem als secret file in Render.")
+        raise RuntimeError("Private key ontbreekt")
+
+    now = datetime.utcnow()
+    payload = {
+        "sub": holder,
+        "iss": JWT_ISSUER,
+        "iat": now,
+        "exp": now + timedelta(minutes=JWT_EXP_MINUTES)
+    }
+    if attrs:
+        payload.update(attrs)
+
     token = jwt.encode(payload, JWT_PRIVATE_KEY, algorithm="ES256")
     return token
 
-# -----------------------------------------------------
-# PARADYM STATUS HELPER
-# -----------------------------------------------------
 async def get_paradym_status(presentation_id: str) -> dict:
+    """Haal status bij Paradym."""
     url = f"{PARADYM_BASE}/v1/projects/{PROJECT_ID}/openid4vc/verification/{presentation_id}"
     headers = {"x-access-token": PARADYM_API_KEY}
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with httpx.AsyncClient(timeout=20.0) as client:
         resp = await client.get(url, headers=headers)
         if resp.status_code != 200:
-            return {"error": f"{resp.status_code}", "raw": resp.text}
-
-    try:
-        return resp.json()
-    except Exception:
-        return {"error": "invalid_json", "raw": resp.text}
+            safe_print(f"[WARN] Paradym API {resp.status_code}: {resp.text}")
+            return {"error": str(resp.status_code), "raw": resp.text}
+        try:
+            return resp.json()
+        except Exception as e:
+            safe_print(f"[ERROR] Invalid JSON: {e}")
+            return {"error": "invalid_json"}
 
 # -----------------------------------------------------
 # ROUTES
@@ -98,7 +118,7 @@ async def get_paradym_status(presentation_id: str) -> dict:
 async def root():
     return {
         "status": "running",
-        "service": "Paradym Login Verifier (JWT direct generator)",
+        "service": "Paradym Login Verifier API",
         "project_id": PROJECT_ID,
         "template_id": PRESENTATION_TEMPLATE_ID,
         "base_url": BASE_URL,
@@ -115,7 +135,7 @@ async def create_request(req: PresentationRequest):
     payload = {
         "presentationTemplateId": PRESENTATION_TEMPLATE_ID,
         "redirect_uri": f"{BASE_URL}/presentation/{request_id}",
-        "state": state
+        "state": state,
     }
 
     headers = {"x-access-token": PARADYM_API_KEY, "Content-Type": "application/json"}
@@ -128,71 +148,96 @@ async def create_request(req: PresentationRequest):
         return JSONResponse(status_code=resp.status_code, content={"error": resp.text})
 
     data = resp.json()
+    pres_id = data.get("id")
+    sessions[request_id] = {
+        "status": "pending",
+        "state": state,
+        "presentation_id": pres_id,
+        "verified": False,
+        "created_at": now_iso(),
+    }
+
+    safe_print(f"[DEBUG] ✅ Created verification request {request_id}")
     return {
         "request_id": request_id,
         "openid_url": data.get("authorizationRequestUri"),
-        "openid_qr_url": data.get("authorizationRequestQrUri") or data.get("authorizationRequestUri"),
-        "presentation_id": data.get("id"),
+        "openid_qr_url": data.get("authorizationRequestQrUri"),
+        "presentation_id": pres_id,
     }
 
 # -----------------------------------------------------
-# 2️⃣ Directe JWT generatie uit Paradym-resultaat
+# 2️⃣ Handle Paradym redirect
 # -----------------------------------------------------
-@app.post("/jwt/from_paradym")
-async def jwt_from_paradym(request: Request):
-    """Genereert een JWT direct uit de Paradym verificatie-JSON."""
-    try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON")
+@app.get("/presentation/{request_id}")
+async def presentation_redirect(request_id: str, request: Request):
+    params = dict(request.query_params)
+    verified = params.get("verified", "true").lower() == "true"
+    holder = params.get("holder") or params.get("subject") or "unknown"
 
-    if body.get("status") != "verified":
-        raise HTTPException(status_code=400, detail="Verification not completed")
+    sessions[request_id] = {
+        "status": "completed" if verified else "failed",
+        "verified": verified,
+        "holder": holder,
+        "params": params,
+        "completed_at": now_iso(),
+    }
 
-    # Pak de relevante data uit
-    try:
-        cred = body["credentials"][0]
+    return PlainTextResponse("✅ Verificatie voltooid. Je mag dit venster sluiten.")
+
+# -----------------------------------------------------
+# 3️⃣ Check status + auto-JWT
+# -----------------------------------------------------
+@app.get("/presentation/{request_id}/status")
+async def get_status(request_id: str):
+    sess = sessions.get(request_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    # Update status vanuit Paradym
+    if sess.get("status") == "pending":
+        result = await get_paradym_status(sess["presentation_id"])
+        if (result.get("status") or "").lower() == "verified":
+            cred = result["credentials"][0]
+            attrs = cred.get("presentedAttributes", {})
+            holder = cred.get("holder") or attrs.get("cnf", {}).get("kid", "unknown")
+            sess.update({
+                "status": "completed",
+                "verified": True,
+                "result": result,
+                "holder": holder,
+                "completed_at": now_iso()
+            })
+            jwt_token = generate_jwt(holder, {"role": attrs.get("role"), "gemeente": attrs.get("gemeente")})
+            sess["jwt_token"] = jwt_token
+            safe_print(f"[DEBUG] ✅ JWT generated for {request_id}")
+
+    if sess.get("verified") and "jwt_token" not in sess:
+        # nog geen token? maak alsnog
+        result = sess.get("result", {})
+        cred = result.get("credentials", [{}])[0]
         attrs = cred.get("presentedAttributes", {})
-        holder = cred.get("holder") or attrs.get("cnf", {}).get("kid", "unknown")
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid credentials format: {e}")
+        holder = sess.get("holder", "unknown")
+        sess["jwt_token"] = generate_jwt(holder, {"role": attrs.get("role"), "gemeente": attrs.get("gemeente")})
 
-    # Bouw JWT payload
-    now = datetime.utcnow()
-    payload = {
-        "sub": holder,
-        "iss": JWT_ISSUER,
-        "iat": now,
-        "exp": now + timedelta(minutes=JWT_EXP_MINUTES),
-        "role": attrs.get("role"),
-        "gemeente": attrs.get("gemeente"),
-        "vct": attrs.get("vct"),
-    }
-
-    try:
-        token = generate_jwt(payload)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"JWT generation failed: {e}")
-
-    return {"jwt_token": token, "payload": payload}
+    return sess
 
 # -----------------------------------------------------
-# 3️⃣ Public key endpoint
+# 4️⃣ Public key endpoint
 # -----------------------------------------------------
 @app.get("/.well-known/jwks.json")
 async def jwks():
     if not JWT_PUBLIC_KEY:
-        raise HTTPException(status_code=404, detail="Public key niet gevonden in /etc/secrets/ec_public.pem")
+        raise HTTPException(status_code=404, detail="Public key niet gevonden")
     return {"algorithm": "ES256", "public_key": JWT_PUBLIC_KEY, "issuer": JWT_ISSUER}
 
 # -----------------------------------------------------
-# 4️⃣ Frontend
+# 5️⃣ Frontend bestanden
 # -----------------------------------------------------
 @app.get("/frontend")
 async def serve_frontend():
     path = os.path.join(os.path.dirname(__file__), "index.html")
     if not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="Frontend not found")
+        return PlainTextResponse("Frontend niet gevonden.")
     return FileResponse(path)
 
 @app.get("/dashboard.html")
@@ -207,5 +252,5 @@ async def serve_dashboard():
 # -----------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
-    print("🚀 Starting Paradym Login Verifier API (direct JWT mode) on port 8000", flush=True)
+    safe_print("🚀 Starting Paradym Login Verifier API (auto-JWT mode) on port 8000")
     uvicorn.run(app, host="0.0.0.0", port=8000)

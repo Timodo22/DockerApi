@@ -40,6 +40,11 @@ JWT_PUBLIC_KEY_PEM = read_secret_file("/etc/secrets/ec_public.pem")
 JWT_ISSUER = "ParadymVerifier"
 JWT_EXP_MINUTES = 15
 
+@app.options("/{any_path:path}")
+async def options_handler(any_path: str):
+    return PlainTextResponse("OK", status_code=200)
+
+
 
 def load_public_jwk_components(pem_str):
     """Converteert PEM naar JWK (x,y) voor ES256."""
@@ -226,4 +231,5 @@ async def oidc():
         "issuer": JWT_ISSUER,
         "jwks_uri": f"{BASE_URL}/.well-known/jwks.json"
     }
+
 

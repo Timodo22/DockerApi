@@ -38,7 +38,7 @@ JWT_PRIVATE_KEY = read_secret_file("/etc/secrets/ec_private.pem")
 JWT_PUBLIC_KEY_PEM = read_secret_file("/etc/secrets/ec_public.pem")
 
 JWT_ISSUER = "ParadymVerifier"
-JWT_EXP_MINUTES = 15
+JWT_EXP_MINUTES = 100
 
 @app.options("/{any_path:path}")
 async def options_handler(any_path: str):
@@ -231,5 +231,6 @@ async def oidc():
         "issuer": JWT_ISSUER,
         "jwks_uri": f"{BASE_URL}/.well-known/jwks.json"
     }
+
 
 
